@@ -1,0 +1,69 @@
+[gd_scene load_steps=10 format=3 uid="uid://dopxpjgtfffh4"]
+
+[ext_resource type="Script" path="res://demo/movable_camera.gd" id="2_kdd2p"]
+[ext_resource type="Texture2D" uid="uid://ccjsyuvc2x8oj" path="res://addons/jar_path_tracing/icons/terrain.svg" id="2_nwev3"]
+[ext_resource type="ArrayMesh" uid="uid://c8s1c6pob6ry1" path="res://demo/suzanne.obj" id="3_rovw5"]
+[ext_resource type="Script" path="res://demo/fps_meter.gd" id="4_w0fmn"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_tctin"]
+
+[sub_resource type="Sky" id="Sky_vgllt"]
+sky_material = SubResource("ProceduralSkyMaterial_tctin")
+
+[sub_resource type="Environment" id="Environment_tn4qg"]
+background_mode = 2
+sky = SubResource("Sky_vgllt")
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_myixh"]
+albedo_color = Color(0.04, 0.92, 1, 1)
+
+[sub_resource type="TorusMesh" id="TorusMesh_kupfw"]
+inner_radius = 2.035
+outer_radius = 3.029
+
+[node name="Demo" type="Node3D"]
+
+[node name="Camera3D" type="PathTracingCamera" parent="." node_paths=PackedStringArray("output_texture", "geometry_group")]
+output_texture = NodePath("OutputTexture")
+geometry_group = NodePath("../GeometryGroup3D")
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 32.7694)
+script = ExtResource("2_kdd2p")
+move_speed = 2.0
+look_sensitivity = 0.01
+
+[node name="OutputTexture" type="TextureRect" parent="Camera3D"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+texture = ExtResource("2_nwev3")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_tn4qg")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="WorldEnvironment"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.3639, 0)
+visible = false
+mesh = ExtResource("3_rovw5")
+skeleton = NodePath("../..")
+
+[node name="GeometryGroup3D" type="GeometryGroup3D" parent="."]
+
+[node name="MeshInstance3D2" type="MeshInstance3D" parent="GeometryGroup3D"]
+transform = Transform3D(2.6198, 0, 0, 0, 0.991023, 0, 0, 0, 0.991023, 0, -0.296605, 0)
+material_override = SubResource("StandardMaterial3D_myixh")
+mesh = ExtResource("3_rovw5")
+
+[node name="MeshInstance3D3" type="MeshInstance3D" parent="GeometryGroup3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.73408, -0.296605, 0)
+mesh = SubResource("TorusMesh_kupfw")
+
+[node name="MeshInstance3D4" type="MeshInstance3D" parent="GeometryGroup3D"]
+transform = Transform3D(1, 0, 0, 0, 0.824571, -0.565759, 0, 0.565759, 0.824571, -0.051158, 0.249255, -1.33455)
+mesh = SubResource("TorusMesh_kupfw")
+
+[node name="Label" type="Label" parent="."]
+offset_right = 40.0
+offset_bottom = 23.0
+script = ExtResource("4_w0fmn")

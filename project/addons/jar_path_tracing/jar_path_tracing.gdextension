@@ -1,0 +1,30 @@
+[configuration]
+
+entry_symbol = "jar_path_tracing_library_init"
+compatibility_minimum = "4.1"
+reloadable = true
+
+[libraries]
+
+macos.debug = "res://addons/jar_path_tracing/bin/jar_path_tracing.macos.template_debug.framework"
+macos.release = "res://addons/jar_path_tracing/bin/jar_path_tracing.macos.template_release.framework"
+ios.debug = "res://addons/jar_path_tracing/bin/jar_path_tracing.ios.template_debug.xcframework"
+ios.release = "res://addons/jar_path_tracing/bin/jar_path_tracing.ios.template_release.xcframework"
+windows.debug.x86_32 = "res://addons/jar_path_tracing/bin/jar_path_tracing.windows.template_debug.x86_32.dll"
+windows.release.x86_32 = "res://addons/jar_path_tracing/bin/jar_path_tracing.windows.template_release.x86_32.dll"
+windows.debug.x86_64 = "res://addons/jar_path_tracing/bin/jar_path_tracing.windows.template_debug.x86_64.dll"
+windows.release.x86_64 = "res://addons/jar_path_tracing/bin/jar_path_tracing.windows.template_release.x86_64.dll"
+linux.debug.x86_64 = "res://addons/jar_path_tracing/bin/jar_path_tracing.linux.template_debug.x86_64.so"
+linux.release.x86_64 = "res://addons/jar_path_tracing/bin/jar_path_tracing.linux.template_release.x86_64.so"
+linux.debug.arm64 = "res://addons/jar_path_tracing/bin/jar_path_tracing.linux.template_debug.arm64.so"
+linux.release.arm64 = "res://addons/jar_path_tracing/bin/jar_path_tracing.linux.template_release.arm64.so"
+linux.debug.rv64 = "res://addons/jar_path_tracing/bin/jar_path_tracing.linux.template_debug.rv64.so"
+linux.release.rv64 = "res://addons/jar_path_tracing/bin/jar_path_tracing.linux.template_release.rv64.so"
+android.debug.x86_64 = "res://addons/jar_path_tracing/bin/jar_path_tracing.android.template_debug.x86_64.so"
+android.release.x86_64 = "res://addons/jar_path_tracing/bin/jar_path_tracing.android.template_release.x86_64.so"
+android.debug.arm64 = "res://addons/jar_path_tracing/bin/jar_path_tracing.android.template_debug.arm64.so"
+android.release.arm64 = "res://addons/jar_path_tracing/bin/jar_path_tracing.android.template_release.arm64.so"
+
+[icons]
+JarVoxelTerrain = "res://addons/jar_path_tracing/icons/terrain.svg"
+JarVoxelChunk = "res://addons/jar_path_tracing/icons/terrain.svg"

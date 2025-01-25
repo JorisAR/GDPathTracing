@@ -1,0 +1,55 @@
+# Ignore Godot-specific files
+.export/
+.import/
+*.godot
+
+# Ignore build and output directories
+bin/
+build/
+
+# Ignore user-specific files
+*.sconsign.dblite
+*.sconsign
+/.sconsign.dblite
+
+# Ignore Rider project files
+.idea/
+.idea_modules/
+.idea*/workspace.xml
+.idea*/tasks.xml
+.idea*/dictionaries
+
+# Ignore Visual Studio files
+.vscode/
+*.code-workspace
+.vs/
+*.csproj.user
+*.vcxproj.user
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*_i.c
+*_p.c
+*_d.c
+*_r.c
+*.opensdf
+*.sdf
+*.vcxproj.*
+ipch/
+obj/
+.vscode/*
+.vscode/*.js
+.vscode/*.ts
+.vscode/*.log
+
+# Ignore Python related files
+__pycache__/
+*.py[cod]
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+desktop.ini
+vc140.pdb
+*.obj
