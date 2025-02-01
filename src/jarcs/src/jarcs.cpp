@@ -67,6 +67,7 @@ ComputeShader::~ComputeShader()
 
 RID ComputeShader::create_storage_buffer_uniform(const PackedByteArray &data, const int binding, const int set)
 {
+    //todo check if binding already exists, then return and print error.
     RID rid = _rd->storage_buffer_create(data.size(), data);
     _buffers.push_back(rid);
     Ref<RDUniform> uniform = memnew(RDUniform);

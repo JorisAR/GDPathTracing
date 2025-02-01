@@ -11,8 +11,8 @@ BoundingBox::BoundingBox()
 
 void BoundingBox::extend(const vec4 &point)
 {
-    min = vec4(std::min(min.x, point.x), std::min(min.y, point.y), std::min(min.z, point.z));
-    max = vec4(std::max(max.x, point.x), std::max(max.y, point.y), std::max(max.z, point.z));
+    min = min.min(point);
+    max = max.max(point);
 }
 
 bool BoundingBox::intersect(const BoundingBox &other) const
@@ -21,7 +21,8 @@ bool BoundingBox::intersect(const BoundingBox &other) const
              min.z > other.max.z || max.z < other.min.z);
 }
 
-BoundingBox BVHBuilder::compute_bounding_box(const std::vector<Triangle> &triangles, int start, int end)
+BoundingBox BVHBuilder::compute_bounding_box(const std::vector<Triangle> &triangles, const int start,
+                                             const int end) const
 {
     BoundingBox bbox;
     for (int i = start; i < end; i++)
@@ -33,6 +34,36 @@ BoundingBox BVHBuilder::compute_bounding_box(const std::vector<Triangle> &triang
         }
     }
     return bbox;
+}
+
+float BVHBuilder::EvaluateSAH(const std::vector<Triangle> &triangles, const BVHNode &node, const int axis,
+                              const float pos) const
+{
+    // determine triangle counts and bounds for this split candidate
+    BoundingBox leftBox, rightBox;
+    int leftCount = 0, rightCount = 0;
+    for (int i = 0; i < node.tri_count; i++)
+    {
+        const Triangle &triangle = triangles[node.first_tri_index + i];
+        float centroid =
+            (triangle.vertices[0][axis] + triangle.vertices[1][axis] + triangle.vertices[2][axis]) * 0.33333333f;
+        if (centroid < pos)
+        {
+            leftCount++;
+            leftBox.extend(triangle.vertices[0]);
+            leftBox.extend(triangle.vertices[1]);
+            leftBox.extend(triangle.vertices[2]);
+        }
+        else
+        {
+            rightCount++;
+            rightBox.extend(triangle.vertices[0]);
+            rightBox.extend(triangle.vertices[1]);
+            rightBox.extend(triangle.vertices[2]);
+        }
+    }
+    float cost = leftCount * leftBox.area() + rightCount * rightBox.area();
+    return cost > 0 ? cost : 1e30f;
 }
 
 unsigned int BVHBuilder::build_recursive(std::vector<BVHNode> &nodes, std::vector<Triangle> &triangles, int start,
@@ -56,18 +87,38 @@ unsigned int BVHBuilder::build_recursive(std::vector<BVHNode> &nodes, std::vecto
     {
         return node_index;
     }
-    // Choose the axis with the largest extent
-    vec4 extent = bbox.max - bbox.min;
-    int axis = extent.x > extent.y ? (extent.x > extent.z ? 0 : 2) : (extent.y > extent.z ? 1 : 2);
-    float splitPos = 0.5f * (bbox.min[axis] + bbox.max[axis]);
+    // determine split axis using SAH
+    int bestAxis = -1;
+    float bestPos = 0, bestCost = 1e30f;
+    for (int axis = 0; axis < 3; axis++)
+    {
+        for (unsigned int i = 0; i < node.tri_count; i++)
+        {
+            const Triangle &triangle = triangles[node.first_tri_index + i];
+            float centroid =
+                (triangle.vertices[0][axis] + triangle.vertices[1][axis] + triangle.vertices[2][axis]) * 0.33333333f;
+            float cost = EvaluateSAH(triangles, node, axis, centroid);
+            if (cost < bestCost)
+                bestPos = centroid, bestAxis = axis, bestCost = cost;
+        }
+    }
+    int axis = bestAxis;
+    float splitPos = bestPos;
+
+    // Dont split if cost would be greater
+    vec4 e = node.aabbMax - node.aabbMin;
+    float parentArea = e.x * e.y + e.y * e.z + e.z * e.x;
+    float parentCost = node.tri_count * parentArea;
+    if (bestCost >= parentCost)
+        return node_index;
 
     // Partition the triangles around the split position
     int i = start;
     int j = end - 1;
     while (i <= j)
     {
-        vec4 centroid = (triangles[i].vertices[0] + triangles[i].vertices[1] + triangles[i].vertices[2]) / 3.0;
-        if (centroid[axis] < splitPos)
+        float centroid = (triangles[i].vertices[0][axis] + triangles[i].vertices[1][axis] + triangles[i].vertices[2][axis]) * 0.33333333f;
+        if (centroid < splitPos)
             i++;
         else
             std::swap(triangles[i], triangles[j--]);
@@ -75,7 +126,8 @@ unsigned int BVHBuilder::build_recursive(std::vector<BVHNode> &nodes, std::vecto
 
     // Ensure the partitioning isn't degenerate
     int left_count = i - start;
-    if (left_count == 0 || left_count == node.tri_count) return node_index;
+    if (left_count == 0 || left_count == node.tri_count)
+        return node_index;
 
     // UtilityFunctions::print(node_index);
     nodes[node_index].left_child = build_recursive(nodes, triangles, start, i);
@@ -85,7 +137,8 @@ unsigned int BVHBuilder::build_recursive(std::vector<BVHNode> &nodes, std::vecto
     return node_index;
 }
 
-unsigned int BVHBuilder::BuildBVH(std::vector<BVHNode> &nodes, std::vector<Triangle> &triangles, const Ref<ArrayMesh> &arrayMesh)
+unsigned int BVHBuilder::BuildBVH(std::vector<BVHNode> &nodes, std::vector<Triangle> &triangles,
+                                  const Ref<ArrayMesh> &arrayMesh)
 {
     int start = triangles.size();
 
@@ -105,7 +158,7 @@ unsigned int BVHBuilder::BuildBVH(std::vector<BVHNode> &nodes, std::vector<Trian
                     vec4(vertices[indices[i + j]].x, vertices[indices[i + j]].y, vertices[indices[i + j]].z);
                 tri.normals[j] = vec4(normals[indices[i + j]].x, normals[indices[i + j]].y, normals[indices[i + j]].z);
                 tri.uvs[j] = vec2(uvs[indices[i + j]].x, uvs[indices[i + j]].y);
-                // tri.materialIndex = l;
+                tri.materialIndex = l;
             }
             triangles.push_back(tri);
         }
@@ -119,9 +172,123 @@ unsigned int BVHBuilder::BuildBVH(std::vector<BVHNode> &nodes, std::vector<Trian
     return build_recursive(nodes, triangles, start, end);
 }
 
-// #define print_as_tree
+#define print_as_tree
 
 void BVHBuilder::print_tree(const std::vector<BVHNode> &nodes)
+{
+#ifdef print_as_tree
+    std::vector<int> stack;
+    stack.push_back(0);
+    while (true)
+    {
+        if (stack.empty())
+            break;
+        int i = stack.back();
+        stack.pop_back();
+#else
+    for (size_t i = 0; i < nodes.size(); i++)
+    {
+#endif
+        unsigned int left_child = nodes[i].left_child;
+        unsigned int right_child = nodes[i].right_child;
+        unsigned int first_tri_index = nodes[i].first_tri_index;
+        unsigned int tri_count = nodes[i].tri_count;
+        UtilityFunctions::print("{Node: l: " + godot::String(std::to_string(left_child).c_str()) +
+                                ", r: " + godot::String(std::to_string(right_child).c_str()) +
+                                ", t: " + godot::String(std::to_string(first_tri_index).c_str()) +
+                                ", c: " + godot::String(std::to_string(tri_count).c_str()) + "}");
+#ifdef print_as_tree
+        if (left_child != 0)
+        {
+            stack.push_back(left_child);
+        }
+        if (right_child != 0)
+        {
+            stack.push_back(right_child);
+        }
+#endif
+    }
+}
+
+void TLAS::build(std::vector<TLASNode> &tlasNodes, const std::vector<BLASInstance> &blasInstances)
+{
+    int blasCount = blasInstances.size();
+    tlasNodes.reserve(blasCount * 2 - 1);
+
+    // Reserve slot 0 for the root
+    TLASNode rootNode;
+    tlasNodes.push_back(rootNode);
+
+    // Assign a TLAS leaf node to each BLAS
+    std::vector<int> nodeIdx;
+    nodeIdx.reserve(blasCount);
+    int nodesUsed = 1;
+
+    for (size_t i = 0; i < blasCount; i++)
+    {
+        TLASNode node;
+        node.aabbMin = vec3(blasInstances[i].aabbMin);
+        node.aabbMax = vec3(blasInstances[i].aabbMax);
+        node.blas = i;
+        node.leftRight = 0; // makes it a leaf
+        tlasNodes.push_back(node);
+        nodeIdx.push_back(nodesUsed++);
+    }
+
+    // Use agglomerative clustering to build the TLAS
+    int A = 0, B = FindBestMatch(tlasNodes, nodeIdx, blasCount, A);
+    while (blasCount > 1)
+    {
+        int C = FindBestMatch(tlasNodes, nodeIdx, blasCount, B);
+        if (A == C)
+        {
+            int nodeIdxA = nodeIdx[A], nodeIdxB = nodeIdx[B];
+            TLASNode &nodeA = tlasNodes[nodeIdxA];
+            TLASNode &nodeB = tlasNodes[nodeIdxB];
+            TLASNode newNode;
+            newNode.leftRight = nodeIdxA + (nodeIdxB << 16);
+            newNode.aabbMin = nodeA.aabbMin.min(nodeB.aabbMin);
+            newNode.aabbMax = nodeA.aabbMax.max(nodeB.aabbMax);
+            tlasNodes.push_back(newNode);
+            nodeIdx[A] = nodesUsed++;
+            nodeIdx[B] = nodeIdx[--blasCount];
+            B = FindBestMatch(tlasNodes, nodeIdx, blasCount, A);
+        }
+        else
+        {
+            A = B;
+            B = C;
+        }
+    }
+
+    // Set the root node
+    tlasNodes[0] = tlasNodes[nodeIdx[A]];
+}
+
+inline int TLAS::FindBestMatch(const std::vector<TLASNode> &tlasNodes, const std::vector<int> &list, const int N,
+                               const int A) const
+{
+    float smallest = 1e30f;
+    int bestB = -1;
+    for (int B = 0; B < N; B++)
+    {
+        if (B != A)
+        {
+            vec3 bmax = tlasNodes[list[A]].aabbMax.max(tlasNodes[list[B]].aabbMax);
+            vec3 bmin = tlasNodes[list[A]].aabbMin.min(tlasNodes[list[B]].aabbMin);
+            vec3 e = bmax - bmin;
+            float surfaceArea = e.x * e.y + e.y * e.z + e.z * e.x;
+            if (surfaceArea < smallest)
+            {
+                smallest = surfaceArea;
+                bestB = B;
+            }
+        }
+    }
+    return bestB;
+}
+
+void TLAS::print_tree(const std::vector<TLASNode> &nodes)
 {
 #ifdef print_as_tree
     std::vector<int> stack;
@@ -137,14 +304,13 @@ void BVHBuilder::print_tree(const std::vector<BVHNode> &nodes)
     for (size_t i = 0; i < nodes.size(); i++)
     {
 #endif
-        unsigned int left_child = nodes[i].left_child;
-        unsigned int right_child = nodes[i].right_child;
-        unsigned int first_tri_index = nodes[i].first_tri_index;
-        unsigned int tri_count = nodes[i].tri_count;
+        unsigned int left_child = nodes[i].leftRight & 0xFFFF;
+        unsigned int right_child = nodes[i].leftRight >> 16;
+        unsigned int blas = nodes[i].blas;
         UtilityFunctions::print("{Node: l: " + godot::String(std::to_string(left_child).c_str()) +
                                 ", r: " + godot::String(std::to_string(right_child).c_str()) +
-                                ", t: " + godot::String(std::to_string(first_tri_index).c_str()) +
-                                ", c: " + godot::String(std::to_string(tri_count).c_str()) + "}");
+                                ", b: " + godot::String(std::to_string(blas).c_str()) + ", m" +
+                                nodes[i].aabbMin.toString() + ", M" + nodes[i].aabbMax.toString() + "}");
 #ifdef print_as_tree
         if (left_child != 0)
         {

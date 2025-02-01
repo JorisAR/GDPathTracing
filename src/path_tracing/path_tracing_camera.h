@@ -13,6 +13,7 @@
 #include <godot_cpp/classes/texture_rect.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
+#include <godot_cpp/variant/projection.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 using namespace godot;
@@ -40,7 +41,6 @@ class PathTracingCamera : public Node3D
     void set_geometry_group(GeometryGroup3D *value);
 
   private:
-    RenderParameters GetRenderParameters();
     void init();
     void clear_compute_shader();
     void render();
@@ -54,13 +54,19 @@ class PathTracingCamera : public Node3D
     Ref<Image> output_image;
     Ref<ImageTexture> output_texture;
 
+    RenderParameters render_parameters;
+    Camera camera;
+    Projection projection_matrix;
+
     // BUFFER IDs
     RID output_texture_rid;
     RID render_parameters_rid;
+    RID camera_rid;
     RID triangles_rid;
     RID materials_rid;
     RID bvh_tree_rid;
     RID blas_rid;
+    RID tlas_rid;
 };
 
 #endif // PATH_TRACING_CAMERA_H

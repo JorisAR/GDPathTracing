@@ -89,13 +89,6 @@ void PathTracingCamera::set_geometry_group(GeometryGroup3D *value)
     geometry_group = value;
 }
 
-RenderParameters PathTracingCamera::GetRenderParameters()
-{
-    auto basis = get_global_transform().get_basis();
-    return RenderParameters(1920, 1080, fov, geometry_group->get_triangle_count(), geometry_group->get_blas_count(), get_global_position(),
-                            basis.get_column(2), basis.get_column(0), basis.get_column(1));
-}
-
 void PathTracingCamera::init()
 {
     // setup geometry
@@ -107,12 +100,22 @@ void PathTracingCamera::init()
 
     geometry_group->build();
 
+    { // setup parameters
+        render_parameters.width = 1920;
+        render_parameters.height = 1080;
+        render_parameters.fov = fov;
+        render_parameters.triangleCount = geometry_group->get_triangle_count();
+        render_parameters.blasCount = geometry_group->get_blas_count();
+        projection_matrix = Projection::create_perspective(fov, static_cast<float>(render_parameters.width) / render_parameters.height, 0.1f, 1000.0f, true);
+        camera.set_camera_transform(get_global_transform().affine_inverse(), projection_matrix);
+    }
+
     // setup compute shader
     cs = new ComputeShader("res://addons/jar_path_tracing/src/shaders/main.glsl");
     //--------- GENERAL BUFFERS ---------
     { // input general buffer
-        render_parameters_rid =
-            cs->create_storage_buffer_uniform(GetRenderParameters().to_packed_byte_array(), 0, 0); // cs-> add render params buffer
+        render_parameters_rid = cs->create_storage_buffer_uniform(render_parameters.to_packed_byte_array(), 1, 0);
+        camera_rid = cs->create_storage_buffer_uniform(camera.to_packed_byte_array(), 2, 0);
     }
 
     { // output texture
@@ -125,7 +128,7 @@ void PathTracingCamera::init()
         output_image = Image::create(1920, 1080, false, Image::FORMAT_RGBA8);
         output_texture = ImageTexture::create_from_image(output_image);
         output_texture_rect->set_texture(output_texture);
-        output_texture_rid = cs->create_image_uniform(output_image, output_format, 1, 0);
+        output_texture_rid = cs->create_image_uniform(output_image, output_format, 0, 0);
     }
 
     //--------- SCENE STORAGE ---------
@@ -134,6 +137,7 @@ void PathTracingCamera::init()
         materials_rid = cs->create_storage_buffer_uniform(geometry_group->get_materials_buffer(), 1, 1);
         bvh_tree_rid = cs->create_storage_buffer_uniform(geometry_group->get_bvh_buffer(), 2, 1);
         blas_rid = cs->create_storage_buffer_uniform(geometry_group->get_blas_buffer(), 3, 1);
+        tlas_rid = cs->create_storage_buffer_uniform(geometry_group->get_tlas_buffer(), 4, 1);
     }
 
     cs->finish_create_uniforms();
@@ -147,10 +151,12 @@ void PathTracingCamera::render()
 {
     if (cs == nullptr || !cs->check_ready())
         return;
-    //update rendering parameters
-    cs->update_storage_buffer_uniform(render_parameters_rid, GetRenderParameters().to_packed_byte_array());
+    // update rendering parameters
+    camera.set_camera_transform(get_global_transform(), projection_matrix);
+    camera.frame_index++;
+    cs->update_storage_buffer_uniform(camera_rid, camera.to_packed_byte_array());
 
-    //render
+    // render
     Vector2i Size = {1920, 1080};
     cs->compute({static_cast<int32_t>(std::ceil(Size.x / 32.0f)), static_cast<int32_t>(std::ceil(Size.y / 32.0f)), 1});
     output_image->set_data(Size.x, Size.y, false, Image::FORMAT_RGBA8,

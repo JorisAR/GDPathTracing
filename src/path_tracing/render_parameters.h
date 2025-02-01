@@ -1,41 +1,64 @@
 #ifndef RENDER_PARAMETERS
 #define RENDER_PARAMETERS
 
-#include <godot_cpp/variant/vector4.hpp>
-#include <godot_cpp/variant/vector3.hpp>
-#include <godot_cpp/variant/packed_byte_array.hpp>
-#include <cstring> // for std::memcpy
+#include "bvh/utils.h"
 #include "bvh/vec.h"
+#include <cstring> // for std::memcpy
+#include <godot_cpp/variant/packed_byte_array.hpp>
+#include <godot_cpp/variant/transform3d.hpp>
+#include <godot_cpp/variant/vector3.hpp>
+#include <godot_cpp/variant/vector4.hpp>
 
 using namespace godot;
 
 struct RenderParameters // match the struct on the gpu
 {
+
+    Vector4 backgroundColor;
     int width;
     int height;
     float fov;
     unsigned int triangleCount;
-    Vector4 cameraPosition;
-    Vector4 cameraUp;
-    Vector4 cameraRight;
-    Vector4 cameraForward;
     unsigned int blasCount;
-   
-
-    RenderParameters(int width, int height, float fov, unsigned int triangleCount, unsigned int blasCount, Vector3 cameraPosition, Vector3 cameraForward, Vector3 cameraRight, Vector3 cameraUp)
-        : width(width), height(height), fov(fov), triangleCount(triangleCount), blasCount(blasCount)
-    {
-        this->cameraPosition = Vector4(cameraPosition.x, cameraPosition.y, cameraPosition.z, 1.0f);
-        this->cameraForward = Vector4(cameraForward.x, cameraForward.y, cameraForward.z, 0.0f);
-        this->cameraRight = Vector4(cameraRight.x, cameraRight.y, cameraRight.z, 0.0f);
-        this->cameraUp = Vector4(cameraUp.x, cameraUp.y, cameraUp.z, 0.0f);
-    }
 
     PackedByteArray to_packed_byte_array()
     {
         PackedByteArray byte_array;
         byte_array.resize(sizeof(RenderParameters));
         std::memcpy(byte_array.ptrw(), this, sizeof(RenderParameters));
+        return byte_array;
+    }
+};
+
+struct Camera
+{
+    float vp[16];
+    float ivp[16];
+    BVH::vec4 position;
+    unsigned int frame_index;
+
+    void set_camera_transform(Transform3D &model, Projection &projection)
+    {
+        // Vector3 cameraPosition = transform.origin;
+        // auto cameraForward = transform.basis.get_column(2);
+        // auto cameraRight = transform.basis.get_column(0);
+        // auto cameraUp = transform.basis.get_column(1);
+
+        // this->cameraPosition = Vector4(cameraPosition.x, cameraPosition.y, cameraPosition.z, 1.0f);
+        // this->cameraForward = Vector4(cameraForward.x, cameraForward.y, cameraForward.z, 0.0f);
+        // this->cameraRight = Vector4(cameraRight.x, cameraRight.y, cameraRight.z, 0.0f);
+        // this->cameraUp = Vector4(cameraUp.x, cameraUp.y, cameraUp.z, 0.0f);
+        position = BVH::vec4(model.origin.x, model.origin.y, model.origin.z, 1.0f);
+        Projection t = projection * model.affine_inverse();
+        BVH::projection_to_float(vp, t);
+        BVH::projection_to_float(ivp, t.inverse());
+    }
+
+    PackedByteArray to_packed_byte_array()
+    {
+        PackedByteArray byte_array;
+        byte_array.resize(sizeof(Camera));
+        std::memcpy(byte_array.ptrw(), this, sizeof(Camera));
         return byte_array;
     }
 };

@@ -1,8 +1,9 @@
-[gd_scene load_steps=10 format=3 uid="uid://dopxpjgtfffh4"]
+[gd_scene load_steps=15 format=3 uid="uid://dopxpjgtfffh4"]
 
 [ext_resource type="Script" path="res://demo/movable_camera.gd" id="2_kdd2p"]
 [ext_resource type="Texture2D" uid="uid://ccjsyuvc2x8oj" path="res://addons/jar_path_tracing/icons/terrain.svg" id="2_nwev3"]
 [ext_resource type="ArrayMesh" uid="uid://c8s1c6pob6ry1" path="res://demo/suzanne.obj" id="3_rovw5"]
+[ext_resource type="ArrayMesh" uid="uid://teo4lnhxisnh" path="res://demo/cornell.obj" id="4_5j87i"]
 [ext_resource type="Script" path="res://demo/fps_meter.gd" id="4_w0fmn"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_tctin"]
@@ -14,19 +15,28 @@ sky_material = SubResource("ProceduralSkyMaterial_tctin")
 background_mode = 2
 sky = SubResource("Sky_vgllt")
 
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_avnmi"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_p1ocp"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_yu010"]
+albedo_color = Color(0.379, 1, 0.19, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_bpv2d"]
+albedo_color = Color(1, 0.19, 0.19, 1)
+
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_myixh"]
 albedo_color = Color(0.04, 0.92, 1, 1)
 
-[sub_resource type="TorusMesh" id="TorusMesh_kupfw"]
-inner_radius = 2.035
-outer_radius = 3.029
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_jb11l"]
+albedo_color = Color(1, 0.744, 0.04, 1)
 
 [node name="Demo" type="Node3D"]
 
 [node name="Camera3D" type="PathTracingCamera" parent="." node_paths=PackedStringArray("output_texture", "geometry_group")]
 output_texture = NodePath("OutputTexture")
 geometry_group = NodePath("../GeometryGroup3D")
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 32.7694)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 9.7694)
 script = ExtResource("2_kdd2p")
 move_speed = 2.0
 look_sensitivity = 0.01
@@ -39,29 +49,33 @@ grow_horizontal = 2
 grow_vertical = 2
 texture = ExtResource("2_nwev3")
 
+[node name="Camera3D" type="Camera3D" parent="Camera3D"]
+fov = 90.0
+near = 0.01
+far = 100.0
+
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_tn4qg")
 
-[node name="MeshInstance3D" type="MeshInstance3D" parent="WorldEnvironment"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.3639, 0)
-visible = false
-mesh = ExtResource("3_rovw5")
-skeleton = NodePath("../..")
-
 [node name="GeometryGroup3D" type="GeometryGroup3D" parent="."]
+default_material = SubResource("StandardMaterial3D_avnmi")
 
-[node name="MeshInstance3D2" type="MeshInstance3D" parent="GeometryGroup3D"]
-transform = Transform3D(2.6198, 0, 0, 0, 0.991023, 0, 0, 0, 0.991023, 0, -0.296605, 0)
+[node name="MeshInstance3D4" type="MeshInstance3D" parent="GeometryGroup3D"]
+transform = Transform3D(-2.62268e-08, 0, -0.6, 0, 0.6, 0, 0.6, 0, -2.62268e-08, 0, 0, 0)
+mesh = ExtResource("4_5j87i")
+surface_material_override/0 = SubResource("StandardMaterial3D_p1ocp")
+surface_material_override/1 = SubResource("StandardMaterial3D_yu010")
+surface_material_override/2 = SubResource("StandardMaterial3D_bpv2d")
+
+[node name="MeshInstance3D5" type="MeshInstance3D" parent="GeometryGroup3D"]
+transform = Transform3D(0.918709, 0, 0.394936, -0.0683152, 0.984926, 0.158916, -0.388983, -0.172978, 0.90486, -1.30439, -1.75104, -0.608295)
 material_override = SubResource("StandardMaterial3D_myixh")
 mesh = ExtResource("3_rovw5")
 
-[node name="MeshInstance3D3" type="MeshInstance3D" parent="GeometryGroup3D"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.73408, -0.296605, 0)
-mesh = SubResource("TorusMesh_kupfw")
-
-[node name="MeshInstance3D4" type="MeshInstance3D" parent="GeometryGroup3D"]
-transform = Transform3D(1, 0, 0, 0, 0.824571, -0.565759, 0, 0.565759, 0.824571, -0.051158, 0.249255, -1.33455)
-mesh = SubResource("TorusMesh_kupfw")
+[node name="MeshInstance3D7" type="MeshInstance3D" parent="GeometryGroup3D"]
+transform = Transform3D(1.44381, 0.158618, -0.332176, 0, 1.34457, 0.642048, 0.368104, -0.622146, 1.30289, 0.790388, -1.15649, -1.17417)
+material_override = SubResource("StandardMaterial3D_jb11l")
+mesh = ExtResource("3_rovw5")
 
 [node name="Label" type="Label" parent="."]
 offset_right = 40.0

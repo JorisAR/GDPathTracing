@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://bhfosodf3vjq2"
+path="res://.godot/imported/camera_utils.glsl-dc7060a0b4ea57ad46e97364657cb378.res"
+
+[deps]
+
+source_file="res://addons/jar_path_tracing/src/shaders/camera_utils.glsl"
+dest_files=["res://.godot/imported/camera_utils.glsl-dc7060a0b4ea57ad46e97364657cb378.res"]
+
+[params]
+

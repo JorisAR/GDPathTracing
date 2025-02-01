@@ -6,7 +6,7 @@ GeometryGroup3D::GeometryGroup3D()
 
 int GeometryGroup3D::get_blas_count()
 {
-    return blasInstances.size();
+    return blas_instances.size();
 }
 
 int GeometryGroup3D::get_material_count()
@@ -22,6 +22,11 @@ int GeometryGroup3D::get_triangle_count()
 int GeometryGroup3D::get_bvh_node_count()
 {
     return bvh_nodes.size();
+}
+
+int GeometryGroup3D::get_tlas_node_count()
+{
+    return tlas_nodes.size();
 }
 
 template <typename T> PackedByteArray get_buffer(const std::vector<T> &vec)
@@ -49,12 +54,30 @@ PackedByteArray GeometryGroup3D::get_bvh_buffer()
 
 PackedByteArray GeometryGroup3D::get_blas_buffer()
 {
-    return get_buffer(blasInstances);
+    return get_buffer(blas_instances);
+}
+
+PackedByteArray GeometryGroup3D::get_tlas_buffer()
+{
+    return get_buffer(tlas_nodes);
+}
+
+Ref<StandardMaterial3D> GeometryGroup3D::get_default_material() const
+{
+    return default_material;
+}
+
+void GeometryGroup3D::set_default_material(Ref<StandardMaterial3D> value)
+{
+    default_material = value;
 }
 
 void GeometryGroup3D::_bind_methods()
 {
-    // ClassDB::bind_method(D_METHOD("build"), &GeometryGroup3D::build);
+    ClassDB::bind_method(D_METHOD("get_default_material"), &GeometryGroup3D::get_default_material);
+    ClassDB::bind_method(D_METHOD("set_default_material", "value"), &GeometryGroup3D::set_default_material);
+    ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "default_material", PROPERTY_HINT_RESOURCE_TYPE, "StandardMaterial3D"),
+                 "set_default_material", "get_default_material");
 }
 
 void GeometryGroup3D::_notification(int p_what)
@@ -67,6 +90,27 @@ void GeometryGroup3D::_notification(int p_what)
     {
         // build();
     }
+}
+
+unsigned int GeometryGroup3D::get_material_index(const Ref<Material> &material)
+{
+    // find it in initial references
+    for (size_t i = 0; i < initial_material_references.size(); i++)
+    {
+        if (initial_material_references[i].ptr() == material.ptr())
+        {
+            return i + 1;
+        }
+    }
+    //try to convert and return its index, else return default material index.
+    Ref<StandardMaterial3D> new_material = Ref<StandardMaterial3D>(Object::cast_to<StandardMaterial3D>(*material));
+    if(new_material.is_null())
+    {
+        return 0;
+    }
+    initial_material_references.push_back(material);
+    material_references.push_back(new_material);
+    return material_references.size() - 1;
 }
 
 void GeometryGroup3D::collect_mesh_instances()
@@ -107,29 +151,24 @@ void GeometryGroup3D::collect_mesh_instances()
                     }
                     // material
                     std::vector<int> material_ids;
-                    mesh_instance->get_material_override();
-                    for (size_t i = 0; i < mesh_instance->get_surface_override_material_count(); i++)
+                    if (mesh_instance->get_material_override().is_valid())
                     {
-                        // todo add indidivual materials here
-                    }
-                    // for now, just the single override
-                    Ref<StandardMaterial3D> material =
-                        mesh.is_valid() ? Ref<StandardMaterial3D>(Object::cast_to<StandardMaterial3D>(
-                                              *(mesh_instance->get_material_override())))
-                                        : Ref<StandardMaterial3D>();
-                    if (material.is_null())
-                    {
-                        UtilityFunctions::print("material null");
-                        material_ids.push_back(0);
+                        unsigned int material_id = get_material_index(mesh_instance->get_material_override());
+                        for (size_t i = 0; i < mesh_instance->get_surface_override_material_count(); i++)
+                        {
+                            material_ids.push_back(material_id);
+                        }
                     }
                     else
                     {
-                        UtilityFunctions::print("material not null");
-                        material_references.push_back(material);
-                        material_ids.push_back(material_references.size());
+                        for (size_t i = 0; i < mesh_instance->get_surface_override_material_count(); i++)
+                        {
+                            // todo add indidivual materials here
+                            material_ids.push_back(get_material_index(mesh_instance->get_surface_override_material(i)));
+                        }
                     }
 
-                    node_references.push_back({mesh_instance, mesh_id, material_ids[0]});
+                    node_references.push_back({mesh_instance, mesh_id, material_ids});
                 }
             }
 
@@ -159,6 +198,18 @@ void GeometryGroup3D::build()
     final_geometry_references.clear();
     node_references.clear();
     material_references.clear();
+    tlas_nodes.clear();
+    bvh_nodes.clear();
+    blas_instances.clear();
+    // ensure existence of some default material
+    if (default_material.is_null())
+    {
+        default_material.instantiate();
+        default_material->set_albedo(Color(0.5f, 0.5f, 0.5f));
+        default_material->set_roughness(0.5f);
+        default_material->set_metallic(0.0f);
+    }
+    material_references.push_back(default_material);
 
     collect_mesh_instances();
 
@@ -182,10 +233,6 @@ void GeometryGroup3D::build()
 
     { // materials
         materials.clear();
-        // default material
-        // only if the user does not set a default material for this group
-        materials.push_back({BVH::vec4(0.5f, 0.5f, 0.5f, 1.0f), 0.0f, 0.5f});
-
         // convert standard materials to gpu materials
         for (size_t i = 0; i < material_references.size(); i++)
         {
@@ -224,18 +271,24 @@ void GeometryGroup3D::build()
         }
         BLASInstance blas_instance;
         blas_instance.blas_index = root_ids[node_references[i].mesh_id];
-        blas_instance.material_index = node_references[i].material_id;
-        blas_instance.set_transform(node_references[i].node->get_global_transform());
+        blas_instance.set_materials(node_references[i].material_ids);
+        blas_instance.set_transform(node_references[i].node->get_global_transform(), bvh_nodes, triangles);
 
-        blasInstances.push_back(blas_instance);
+        blas_instances.push_back(blas_instance);
 
         UtilityFunctions::print("root:");
         UtilityFunctions::print(blas_instance.blas_index);
+        UtilityFunctions::print(blas_instance.material[0]);
+        UtilityFunctions::print(blas_instance.material[1]);
+        UtilityFunctions::print(blas_instance.material[2]);
     }
     UtilityFunctions::print("Blas:");
-    UtilityFunctions::print(blasInstances.size());
+    UtilityFunctions::print(blas_instances.size());
 
     // builder.print_tree(bvh_nodes);
 
-    // Now you can use the collected geometry references to create one large geometry buffer.
+    // create tlas tree; https://jacco.ompf2.com/2022/05/13/how-to-build-a-bvh-part-6-all-together-now/
+    TLAS tlas;
+    tlas.build(tlas_nodes, blas_instances);
+    tlas.print_tree(tlas_nodes);
 }

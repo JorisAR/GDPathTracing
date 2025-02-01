@@ -1,4 +1,4 @@
-# JAR Voxel Terrain
+# Godot Pathtracing Terrain Plugin
 
 This project aims to add a basic Pathtracer to godot using compute shaders. It's primarily intended for educational and experimental purposes.
 

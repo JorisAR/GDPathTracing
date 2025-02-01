@@ -1,0 +1,22 @@
+[remap]
+
+importer="wavefront_obj"
+importer_version=1
+type="Mesh"
+uid="uid://teo4lnhxisnh"
+path="res://.godot/imported/cornell.obj-79d1c1f7d90705f814305bf516203f08.mesh"
+
+[deps]
+
+files=["res://.godot/imported/cornell.obj-79d1c1f7d90705f814305bf516203f08.mesh"]
+
+source_file="res://demo/cornell.obj"
+dest_files=["res://.godot/imported/cornell.obj-79d1c1f7d90705f814305bf516203f08.mesh", "res://.godot/imported/cornell.obj-79d1c1f7d90705f814305bf516203f08.mesh"]
+
+[params]
+
+generate_tangents=true
+scale_mesh=Vector3(1, 1, 1)
+offset_mesh=Vector3(0, 0, 0)
+optimize_mesh=true
+force_disable_mesh_compression=false
