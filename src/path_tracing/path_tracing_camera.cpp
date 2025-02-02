@@ -91,6 +91,9 @@ void PathTracingCamera::set_geometry_group(GeometryGroup3D *value)
 
 void PathTracingCamera::init()
 {
+    //we want to use one RD for all shaders relevant to the camera.
+    _rd = RenderingServer::get_singleton()->create_local_rendering_device();
+
     // setup geometry
     if (geometry_group == nullptr)
     {
@@ -111,13 +114,14 @@ void PathTracingCamera::init()
     }
 
     // setup compute shader
-    cs = new ComputeShader("res://addons/jar_path_tracing/src/shaders/main.glsl");
+    cs = new ComputeShader("res://addons/jar_path_tracing/src/shaders/main.glsl", _rd, {"#define TESTe"});
     //--------- GENERAL BUFFERS ---------
     { // input general buffer
         render_parameters_rid = cs->create_storage_buffer_uniform(render_parameters.to_packed_byte_array(), 1, 0);
         camera_rid = cs->create_storage_buffer_uniform(camera.to_packed_byte_array(), 2, 0);
     }
 
+    Ref<RDTextureView> output_texture_view = memnew(RDTextureView);
     { // output texture
         auto output_format = cs->create_texture_format(1920, 1080, RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM);
         if (output_texture_rect == nullptr)
@@ -128,7 +132,8 @@ void PathTracingCamera::init()
         output_image = Image::create(1920, 1080, false, Image::FORMAT_RGBA8);
         output_texture = ImageTexture::create_from_image(output_image);
         output_texture_rect->set_texture(output_texture);
-        output_texture_rid = cs->create_image_uniform(output_image, output_format, 0, 0);
+        
+        output_texture_rid = cs->create_image_uniform(output_image, output_format, output_texture_view, 0, 0);
     }
 
     //--------- SCENE STORAGE ---------
@@ -141,6 +146,9 @@ void PathTracingCamera::init()
     }
 
     cs->finish_create_uniforms();
+
+    progressive_renderer = new ProgressiveRendering();
+    progressive_renderer->init(_rd, output_texture_rid, output_texture_view);
 }
 
 void PathTracingCamera::clear_compute_shader()
@@ -159,6 +167,11 @@ void PathTracingCamera::render()
     // render
     Vector2i Size = {1920, 1080};
     cs->compute({static_cast<int32_t>(std::ceil(Size.x / 32.0f)), static_cast<int32_t>(std::ceil(Size.y / 32.0f)), 1});
+    
+    {// post processing
+        progressive_renderer->render(get_global_transform());
+    }
+    
     output_image->set_data(Size.x, Size.y, false, Image::FORMAT_RGBA8,
                            cs->get_image_uniform_buffer(output_texture_rid));
     output_texture->update(output_image);

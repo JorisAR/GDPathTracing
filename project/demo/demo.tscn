@@ -1,4 +1,4 @@
-[gd_scene load_steps=15 format=3 uid="uid://dopxpjgtfffh4"]
+[gd_scene load_steps=13 format=3 uid="uid://dopxpjgtfffh4"]
 
 [ext_resource type="Script" path="res://demo/movable_camera.gd" id="2_kdd2p"]
 [ext_resource type="Texture2D" uid="uid://ccjsyuvc2x8oj" path="res://addons/jar_path_tracing/icons/terrain.svg" id="2_nwev3"]
@@ -25,12 +25,6 @@ albedo_color = Color(0.379, 1, 0.19, 1)
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_bpv2d"]
 albedo_color = Color(1, 0.19, 0.19, 1)
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_myixh"]
-albedo_color = Color(0.04, 0.92, 1, 1)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_jb11l"]
-albedo_color = Color(1, 0.744, 0.04, 1)
-
 [node name="Demo" type="Node3D"]
 
 [node name="Camera3D" type="PathTracingCamera" parent="." node_paths=PackedStringArray("output_texture", "geometry_group")]
@@ -49,11 +43,6 @@ grow_horizontal = 2
 grow_vertical = 2
 texture = ExtResource("2_nwev3")
 
-[node name="Camera3D" type="Camera3D" parent="Camera3D"]
-fov = 90.0
-near = 0.01
-far = 100.0
-
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_tn4qg")
 
@@ -69,12 +58,10 @@ surface_material_override/2 = SubResource("StandardMaterial3D_bpv2d")
 
 [node name="MeshInstance3D5" type="MeshInstance3D" parent="GeometryGroup3D"]
 transform = Transform3D(0.918709, 0, 0.394936, -0.0683152, 0.984926, 0.158916, -0.388983, -0.172978, 0.90486, -1.30439, -1.75104, -0.608295)
-material_override = SubResource("StandardMaterial3D_myixh")
 mesh = ExtResource("3_rovw5")
 
 [node name="MeshInstance3D7" type="MeshInstance3D" parent="GeometryGroup3D"]
 transform = Transform3D(1.44381, 0.158618, -0.332176, 0, 1.34457, 0.642048, 0.368104, -0.622146, 1.30289, 0.790388, -1.15649, -1.17417)
-material_override = SubResource("StandardMaterial3D_jb11l")
 mesh = ExtResource("3_rovw5")
 
 [node name="Label" type="Label" parent="."]

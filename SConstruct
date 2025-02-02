@@ -12,11 +12,12 @@ env = SConscript("godot-cpp/SConstruct")
 env.Append(CPPPATH=[
     "src/",
     "src/path_tracing/",
+    "src/path_tracing/post_processing",
     "src/jarcs/include/",
 ])
 
 # Add main source files
-sources = Glob("src/*.cpp") + Glob("src/path_tracing/*.cpp") + Glob("src/jarcs/src/*.cpp")  + Glob("src/bvh/*.cpp")
+sources = Glob("src/*.cpp") + Glob("src/path_tracing/*.cpp") + Glob("src/jarcs/src/*.cpp")  + Glob("src/bvh/*.cpp") + Glob("src/path_tracing/post_processing/*.cpp")
 
 #compiler flags
 if env['PLATFORM'] == 'windows':

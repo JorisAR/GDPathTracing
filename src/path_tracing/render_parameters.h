@@ -11,25 +11,6 @@
 
 using namespace godot;
 
-struct RenderParameters // match the struct on the gpu
-{
-
-    Vector4 backgroundColor;
-    int width;
-    int height;
-    float fov;
-    unsigned int triangleCount;
-    unsigned int blasCount;
-
-    PackedByteArray to_packed_byte_array()
-    {
-        PackedByteArray byte_array;
-        byte_array.resize(sizeof(RenderParameters));
-        std::memcpy(byte_array.ptrw(), this, sizeof(RenderParameters));
-        return byte_array;
-    }
-};
-
 struct Camera
 {
     float vp[16];

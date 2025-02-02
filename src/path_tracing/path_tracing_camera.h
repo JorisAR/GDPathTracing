@@ -3,6 +3,7 @@
 
 #include "geometry_group3d.h"
 #include "jarcs/include/jarcs.h"
+#include "progressive_rendering.h"
 #include "render_parameters.h"
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/image.hpp>
@@ -21,6 +22,25 @@ using namespace godot;
 class PathTracingCamera : public Node3D
 {
     GDCLASS(PathTracingCamera, Node3D);
+
+    struct RenderParameters // match the struct on the gpu
+    {
+
+        Vector4 backgroundColor;
+        int width;
+        int height;
+        float fov;
+        unsigned int triangleCount;
+        unsigned int blasCount;
+
+        PackedByteArray to_packed_byte_array()
+        {
+            PackedByteArray byte_array;
+            byte_array.resize(sizeof(RenderParameters));
+            std::memcpy(byte_array.ptrw(), this, sizeof(RenderParameters));
+            return byte_array;
+        }
+    };
 
   protected:
     static void _bind_methods();
@@ -49,6 +69,7 @@ class PathTracingCamera : public Node3D
     int num_bounces = 4;
 
     ComputeShader *cs = nullptr;
+    ProgressiveRendering *progressive_renderer = nullptr;
     GeometryGroup3D *geometry_group = nullptr;
     TextureRect *output_texture_rect = nullptr;
     Ref<Image> output_image;
@@ -67,6 +88,8 @@ class PathTracingCamera : public Node3D
     RID bvh_tree_rid;
     RID blas_rid;
     RID tlas_rid;
+
+    RenderingDevice *_rd;
 };
 
 #endif // PATH_TRACING_CAMERA_H

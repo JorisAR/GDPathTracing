@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://im3if18oyk2k"
+path="res://.godot/imported/progressive_rendering.glsl-40c43a0c250bd71b5e552c8022ffdff6.res"
+
+[deps]
+
+source_file="res://addons/jar_path_tracing/src/shaders/progressive_rendering.glsl"
+dest_files=["res://.godot/imported/progressive_rendering.glsl-40c43a0c250bd71b5e552c8022ffdff6.res"]
+
+[params]
+

@@ -86,7 +86,7 @@ struct BLASInstance
 
 // ----------------------------------- GENERAL STORAGE -----------------------------------
 
-layout(set = 0, binding = 0, r8) restrict uniform writeonly image2D outputImage;
+layout(set = 0, binding = 0) restrict uniform writeonly image2D outputImage;
 
 layout(std430, set = 0, binding = 1) restrict buffer Params {
     vec4 background; //rgb, brightness
@@ -150,7 +150,7 @@ vec2 pcg2d(inout uvec2 seed) {
 
 vec3 sampleSky(const vec3 direction) {
     float t = 0.5 * (direction.y + 1.0);
-    return mix(vec3(1.0), vec3(0.5, 0.7, 1.0), t);
+    return mix(vec3(0.95), vec3(0.9, 0.94, 1.0), t);
 }
 
 vec3 phongShading(const vec3 cameraPosition, const vec3 position, const vec3 normal, Light light) { 
@@ -386,7 +386,7 @@ layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 void main() {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
     if (pos.x >= params.width || pos.y >= params.height) return;
-    uvec2 seed = uvec2(gl_GlobalInvocationID.xy) ^ uvec2(camera.frame_index << 16, (camera.frame_index + 237) << 16);
+    uvec2 seed = uvec2(gl_GlobalInvocationID.xy) ^ uvec2(camera.frame_index << 16, (camera.frame_index + 2378756348) << 16);
 
     vec2 screenPos = vec2(pos) / vec2(params.width, params.height) * 2.0 - 1.0;
     vec4 ndcPos = vec4(screenPos.x, -screenPos.y, 1.0, 1.0);
@@ -398,15 +398,12 @@ void main() {
     // vec3 ray_origin = get_camera_ray_origin(screenPos, camera.ivp);
     // vec3 ray_dir = get_camera_ray_origin(screenPos, camera.vp);
 
-
     Light light = {vec4(0.0, 4.0, 0.0, 1.0), vec4(1.0, 1.0, 1.0, 1.0)};
-    vec3 color = vec3(0.0f);
-    // HitInfo hitInfo;
 
-    color = path_trace(ray_origin, ray_dir, seed);
+    vec3 radiance = path_trace(ray_origin, ray_dir, seed);
+    #ifdef TEST
+    radiance = vec3(1,0,1);
+    #endif
 
-    // color = vec3(hitInfo.steps / 1024.0);
-    // color = sampleSky(ray_dir);
-
-    imageStore(outputImage, pos, vec4(color, 1.0));
+    imageStore(outputImage, pos, vec4(radiance, 1.0));
 }
