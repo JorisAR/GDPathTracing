@@ -37,33 +37,72 @@ BoundingBox BVHBuilder::compute_bounding_box(const std::vector<Triangle> &triang
 }
 
 float BVHBuilder::EvaluateSAH(const std::vector<Triangle> &triangles, const BVHNode &node, const int axis,
-                              const float pos) const
+                              float &bestSplit) const
 {
-    // determine triangle counts and bounds for this split candidate
-    BoundingBox leftBox, rightBox;
-    int leftCount = 0, rightCount = 0;
-    for (int i = 0; i < node.tri_count; i++)
+    const int BINS = 8;
+    struct Bin
     {
-        const Triangle &triangle = triangles[node.first_tri_index + i];
-        float centroid =
-            (triangle.vertices[0][axis] + triangle.vertices[1][axis] + triangle.vertices[2][axis]) * 0.33333333f;
-        if (centroid < pos)
+        BoundingBox bounds;
+        int count = 0;
+    };
+    Bin bins[BINS];
+
+    // Calculate bin dimensions
+    float minBound = node.aabbMin[axis];
+    float maxBound = node.aabbMax[axis];
+    float range = maxBound - minBound;
+    if (range < 1e-6f)
+        return FLT_MAX; // Degenerate node
+
+    float invRange = 1.0f / range;
+
+    // Bin triangles
+    for (uint32_t i = 0; i < node.tri_count; i++)
+    {
+        const Triangle &tri = triangles[node.first_tri_index + i];
+        float centroid = tri.centroid[axis];
+        int binIdx = std::clamp(int(BINS * (centroid - minBound) * invRange), 0, BINS - 1);
+        bins[binIdx].count++;
+        bins[binIdx].bounds.extend(tri.vertices[0]);
+        bins[binIdx].bounds.extend(tri.vertices[1]);
+        bins[binIdx].bounds.extend(tri.vertices[2]);
+    }
+
+    // Accumulate from left and right
+    float bestCost = FLT_MAX;
+    BoundingBox leftAccum[BINS];
+    int leftCount[BINS];
+
+    // Left-to-right pass
+    BoundingBox leftBox;
+    int countLeft = 0;
+    for (int i = 0; i < BINS - 1; i++)
+    {
+        leftBox.extend(bins[i].bounds.min);
+        leftBox.extend(bins[i].bounds.max);
+        countLeft += bins[i].count;
+        leftAccum[i] = leftBox;
+        leftCount[i] = countLeft;
+    }
+
+    // Right-to-left pass
+    BoundingBox rightBox;
+    int countRight = 0;
+    for (int i = BINS - 1; i > 0; i--)
+    {
+        rightBox.extend(bins[i].bounds.min);
+        rightBox.extend(bins[i].bounds.max);
+        countRight += bins[i].count;
+        float cost = leftAccum[i - 1].area() * leftCount[i - 1] + rightBox.area() * countRight;
+
+        if (cost < bestCost)
         {
-            leftCount++;
-            leftBox.extend(triangle.vertices[0]);
-            leftBox.extend(triangle.vertices[1]);
-            leftBox.extend(triangle.vertices[2]);
-        }
-        else
-        {
-            rightCount++;
-            rightBox.extend(triangle.vertices[0]);
-            rightBox.extend(triangle.vertices[1]);
-            rightBox.extend(triangle.vertices[2]);
+            bestCost = cost;
+            bestSplit = minBound + (float(i) / BINS) * range;
         }
     }
-    float cost = leftCount * leftBox.area() + rightCount * rightBox.area();
-    return cost > 0 ? cost : 1e30f;
+
+    return bestCost;
 }
 
 unsigned int BVHBuilder::build_recursive(std::vector<BVHNode> &nodes, std::vector<Triangle> &triangles, int start,
@@ -83,33 +122,29 @@ unsigned int BVHBuilder::build_recursive(std::vector<BVHNode> &nodes, std::vecto
     node.right_child = 0;
     node.first_tri_index = start;
     node.tri_count = end - start;
-    if (node.tri_count == 1) // leaf
+    if (node.tri_count <= 4) // leaf
     {
         return node_index;
     }
     // determine split axis using SAH
+    float bestSplit, bestCost = 1e30f;
     int bestAxis = -1;
-    float bestPos = 0, bestCost = 1e30f;
-    for (int axis = 0; axis < 3; axis++)
-    {
-        for (unsigned int i = 0; i < node.tri_count; i++)
-        {
-            const Triangle &triangle = triangles[node.first_tri_index + i];
-            float centroid =
-                (triangle.vertices[0][axis] + triangle.vertices[1][axis] + triangle.vertices[2][axis]) * 0.33333333f;
-            float cost = EvaluateSAH(triangles, node, axis, centroid);
-            if (cost < bestCost)
-                bestPos = centroid, bestAxis = axis, bestCost = cost;
+
+    for (int axis = 0; axis < 3; axis++) {
+        float split;
+        float cost = EvaluateSAH(triangles, node, axis, split);
+        if (cost < bestCost) {
+            bestCost = cost;
+            bestSplit = split;
+            bestAxis = axis;
         }
     }
-    int axis = bestAxis;
-    float splitPos = bestPos;
 
     // Dont split if cost would be greater
     vec4 e = node.aabbMax - node.aabbMin;
     float parentArea = e.x * e.y + e.y * e.z + e.z * e.x;
     float parentCost = node.tri_count * parentArea;
-    if (bestCost >= parentCost)
+    if (bestCost >= parentCost * 0.8f) // allow slightly worse splits
         return node_index;
 
     // Partition the triangles around the split position
@@ -117,8 +152,8 @@ unsigned int BVHBuilder::build_recursive(std::vector<BVHNode> &nodes, std::vecto
     int j = end - 1;
     while (i <= j)
     {
-        float centroid = (triangles[i].vertices[0][axis] + triangles[i].vertices[1][axis] + triangles[i].vertices[2][axis]) * 0.33333333f;
-        if (centroid < splitPos)
+        float centroid = triangles[i].centroid[bestAxis];
+        if (centroid < bestSplit)
             i++;
         else
             std::swap(triangles[i], triangles[j--]);
@@ -156,6 +191,7 @@ unsigned int BVHBuilder::BuildBVH(std::vector<BVHNode> &nodes, std::vector<Trian
             {
                 tri.vertices[j] =
                     vec4(vertices[indices[i + j]].x, vertices[indices[i + j]].y, vertices[indices[i + j]].z);
+                tri.centroid = (tri.vertices[0] + tri.vertices[1] + tri.vertices[2]) * 0.33333333f;
                 tri.normals[j] = vec4(normals[indices[i + j]].x, normals[indices[i + j]].y, normals[indices[i + j]].z);
                 tri.uvs[j] = vec2(uvs[indices[i + j]].x, uvs[indices[i + j]].y);
                 tri.materialIndex = l;

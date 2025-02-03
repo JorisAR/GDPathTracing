@@ -19,6 +19,7 @@ namespace BVH
 struct Triangle
 {
     vec4 vertices[3];
+    vec4 centroid;
     vec4 normals[3];
     vec2 uvs[3];
     unsigned int materialIndex;
@@ -75,8 +76,7 @@ struct BLASInstance
     }
 
     // have an array of material ids? say up to 4/8/16 or something
-    void set_transform(const godot::Transform3D &t, const std::vector<BVHNode> &nodes,
-                       const std::vector<Triangle> &triangles)
+    void set_transform(const godot::Transform3D &t, const std::vector<BVHNode> &nodes)
     {
         transform_to_float(transform, t);  
         transform_to_float(inverse_transform, t.affine_inverse());  
@@ -123,7 +123,7 @@ class BVHBuilder
   private:
     BoundingBox compute_bounding_box(const std::vector<Triangle> &triangles, const int start, const int end) const;
     float EvaluateSAH(const std::vector<Triangle> &triangles, const BVHNode &node, const int axis,
-                      const float pos) const;
+                      float& bestSplit) const;
     unsigned int build_recursive(std::vector<BVHNode> &nodes, std::vector<Triangle> &triangles, int start, int end);
 };
 

@@ -44,11 +44,23 @@ struct Camera
     }
 };
 
-struct GpuMaterial // Struct to be uploaded to the GPU
+struct GpuMaterial
 {
     BVH::vec4 albedo;
     float metallic;
     float roughness;
 };
+
+struct GpuTriangleGeometry
+{
+    BVH::vec4 v0, v1, v2;
+};
+
+struct GpuTriangleData
+{
+    BVH::vec4 n0, n1, n2;
+    BVH::vec2 uv0, uv1, uv2;    
+};
+
 
 #endif // RENDER_PARAMETERS

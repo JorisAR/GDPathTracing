@@ -1,6 +1,8 @@
 #[compute]
 #version 460
 
+// #define DEBUG_STEPS
+
 #include "camera_utils.glsl"
 #include "brdfs.glsl"
 
@@ -14,6 +16,7 @@ struct Light {
 
 struct Triangle {
     vec4 vertices[3];
+    vec4 center;
     vec4 normals[3];
     vec2 uvs[3];
     uint materialIndex;
@@ -57,6 +60,7 @@ struct HitInfo {
     float t;
     uint blas;
     uint triangle;
+    uint steps;
     vec2 barycentrics;
     bool front;
     vec3 out_dir; //i suppose this is essentially fragment-camera direction, though only literally for the direct shading point.
@@ -178,6 +182,7 @@ ShadingInfo get_shading_data(const HitInfo h) {
     float v = h.barycentrics.y;
     s.normal = (tri.normals[0] * (1.0 - u - v) + tri.normals[1] * u + tri.normals[2] * v).xyz;//transform normal to global space
     s.normal = (b.transform * vec4(s.normal, 0.0)).xyz;
+    if(!h.front) s.normal = -s.normal;
     s.lambert_out = 1.0; //specularity i think
     s.emission = vec3(0);
     s.fresnel_0 = vec3(0); //unsure
@@ -199,16 +204,12 @@ bool intersectTriangle(const Ray ray, const uint tri_index, in out HitInfo hitIn
     vec3 pvec = cross(ray.d, edge2);
     float det = dot(edge1, pvec);
 
-    if (abs(det) < 1e-8) return false;
+    if (abs(det) < 1e-5) return false;
     float invDet = 1.0 / det;
-
     vec3 tvec = ray.o - v0;
-
     float u = dot(tvec, pvec) * invDet;
     if (u < 0.0 || u > 1.0) return false;
-
     vec3 qvec = cross(tvec, edge1);
-
     float v = dot(ray.d, qvec) * invDet;
     if (v < 0.0 || u + v > 1.0) return false;
 
@@ -220,13 +221,8 @@ bool intersectTriangle(const Ray ray, const uint tri_index, in out HitInfo hitIn
     hitInfo.triangle = tri_index;
     hitInfo.barycentrics = vec2(u, v);
     hitInfo.out_dir = -ray.d;
-    hitInfo.front = true;//depends on order of indices i guess?, i suppose something like: 0 <= dot(ray_dir, cross(edge1, edge2))
-
-    // hitInfo.normal = (tri.normals[0] * (1.0 - u - v) + tri.normals[1] * u + tri.normals[2] * v).xyz;
-    // hitInfo.uv = tri.uvs[0] * (1.0 - u - v) + tri.uvs[1] * u + tri.uvs[2] * v;
-    // hitInfo.t = t;
-    // hitInfo.materialIndex = tri.materialIndex;
-
+    vec3 geometricNormal = normalize(cross(edge1, edge2));
+    hitInfo.front = (dot(geometricNormal, ray.d) > 0.0);
     return true;
 }
 
@@ -249,7 +245,7 @@ bool ray_trace_blas(const uint root, const Ray ray, in out HitInfo hitInfo)
 
     while (stackPtr > 0) {
         BVHNode node = bvhTree[stack[--stackPtr]];
-        // hitInfo.steps++;
+        hitInfo.steps++;
 
         if (node.tri_count > 0) { //isleaf
             for (uint i = 0; i < node.tri_count; i++) {
@@ -261,18 +257,16 @@ bool ray_trace_blas(const uint root, const Ray ray, in out HitInfo hitInfo)
         BVHNode childR = bvhTree[node.right_child];
         float d1 = intersectAABB(ray, childL.aabbMin.xyz, childL.aabbMax.xyz);
         float d2 = intersectAABB(ray, childR.aabbMin.xyz, childR.aabbMax.xyz);
-        if(d1 < d2) {
-            if(d1 < 1e30f) {
-                stack[stackPtr++] = node.left_child;
-                if(d2 != 1e30f) stack[stackPtr++] = node.right_child;
-            }
-        }
-        else {
-            if(d2 < 1e30f) {
-                stack[stackPtr++] = node.right_child;
-                if(d1 != 1e30f) stack[stackPtr++] = node.left_child;
-            }
-        }       
+        bool leftValid = d1 < hitInfo.t;
+        bool rightValid = d2 < hitInfo.t;
+
+        if (d1 < d2) {
+            if (rightValid) stack[stackPtr++] = node.right_child;
+            if (leftValid) stack[stackPtr++] = node.left_child;
+        } else {
+            if (leftValid) stack[stackPtr++] = node.left_child;
+            if (rightValid) stack[stackPtr++] = node.right_child;
+        }   
     }
 
     return hitInfo.t < 1e9;
@@ -287,7 +281,7 @@ bool ray_trace_tlas(const Ray ray, inout HitInfo hitInfo)
 
     while (stackPtr > 0) {
         TLASNode node = tlas_nodes[stack[--stackPtr]];
-        // hitInfo.steps++;
+        hitInfo.steps++;
 
         if(node.leftRight == 0){
             BLASInstance b = blas_instances[node.blas];
@@ -303,24 +297,27 @@ bool ray_trace_tlas(const Ray ray, inout HitInfo hitInfo)
             }
             continue;
         } 
+        // Internal node: Traverse children
         uint left = node.leftRight & 0xFFFF;
         uint right = node.leftRight >> 16;
         TLASNode childL = tlas_nodes[left];
         TLASNode childR = tlas_nodes[right];
+
+        // Intersect with child AABBs
         float d1 = intersectAABB(ray, childL.aabbMin.xyz, childL.aabbMax.xyz);
         float d2 = intersectAABB(ray, childR.aabbMin.xyz, childR.aabbMax.xyz);
-        if(d1 < d2) {
-            if(d1 < 1e30f) {
-                stack[stackPtr++] = left;
-                if(d2 != 1e30f) stack[stackPtr++] = right;
-            }
-        }
-        else {
-            if(d2 < 1e30f) {
-                stack[stackPtr++] = right;
-                if(d1 != 1e30f) stack[stackPtr++] = left;
-            }
-        }          
+
+        // Only push children if their AABB is closer than the current hit
+        bool leftValid = d1 < hitInfo.t;
+        bool rightValid = d2 < hitInfo.t;
+
+        if (d1 < d2) {
+            if (rightValid) stack[stackPtr++] = right;
+            if (leftValid) stack[stackPtr++] = left;
+        } else {
+            if (leftValid) stack[stackPtr++] = left;
+            if (rightValid) stack[stackPtr++] = right;
+        }      
     }
 
     return hitInfo.t < 1e9;
@@ -328,8 +325,15 @@ bool ray_trace_tlas(const Ray ray, inout HitInfo hitInfo)
 //traces scene, and returns shading data. true if scene hit, false if missed (i.e. hit the sky instead)
 bool ray_trace(const Ray ray, out ShadingInfo s) {
     HitInfo hitInfo;
-    hitInfo.t = 1e9;
-    bool hit = ray_trace_tlas(ray, hitInfo);    
+    hitInfo.t = 1e9;    
+    hitInfo.steps = 0;
+    bool hit = ray_trace_tlas(ray, hitInfo);
+
+#ifdef DEBUG_STEPS    
+    s.emission = vec3(clamp(hitInfo.steps / 64.0f, 0, 1));
+    // s.emission = vec3(1,0,1);
+    return false;
+#endif
 
     if(hit)
     {
@@ -346,29 +350,23 @@ bool ray_trace(const Ray ray, out ShadingInfo s) {
     }
 }
 
-vec3 path_trace(const vec3 o, const vec3 d, inout uvec2 seed) {
+vec3 path_trace(Ray ray, inout uvec2 seed) {
     vec3 radiance = vec3(0.0);
     vec3 throughput = vec3(1.0f);
-    Ray ray;
-    ray.o = o;
-    ray.d = d;
-    ray.rD = 1 / d;
     // [[unroll]]
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         ShadingInfo s;
         bool hit = ray_trace(ray, s);
         radiance += throughput * s.emission;
         if(hit) {
             // return s.diffuse_albedo;
-            throughput *= s.diffuse_albedo;          
+            throughput *= s.diffuse_albedo;            
 
             ray.o = s.position + s.normal * 0.001;
             mat3 shading_to_world_space = get_shading_space(s.normal);
             vec3 sampled_dir = sample_hemisphere_psa(pcg2d(seed));
             ray.d = shading_to_world_space * sampled_dir;
-            ray.d = 1 / ray.d;
-
-            
+            ray.rD = 1.0 / ray.d;          
 
 
         } else {
@@ -392,18 +390,23 @@ void main() {
     vec4 ndcPos = vec4(screenPos.x, -screenPos.y, 1.0, 1.0);
     vec4 worldPos = camera.ivp * ndcPos;
     worldPos /= worldPos.w;
-    vec3 ray_origin = camera.position.xyz;
-    vec3 ray_dir = normalize(worldPos.xyz - camera.position.xyz);
 
-    // vec3 ray_origin = get_camera_ray_origin(screenPos, camera.ivp);
-    // vec3 ray_dir = get_camera_ray_origin(screenPos, camera.vp);
+    // Light light = {vec4(0.0, 4.0, 0.0, 1.0), vec4(1.0, 1.0, 1.0, 1.0);
+    Ray ray;
+    ray.o = camera.position.xyz;
+    ray.d = normalize(worldPos.xyz - camera.position.xyz);
+    ray.rD = 1.0 / ray.d;
+    
 
-    Light light = {vec4(0.0, 4.0, 0.0, 1.0), vec4(1.0, 1.0, 1.0, 1.0)};
-
-    vec3 radiance = path_trace(ray_origin, ray_dir, seed);
-    #ifdef TEST
-    radiance = vec3(1,0,1);
-    #endif
+    
+#ifdef DEBUG_STEPS
+    ShadingInfo s;
+    ray_trace(ray, s);
+    vec3 radiance = s.emission;
+#endif
+#ifndef DEBUG_STEPS
+    vec3 radiance = path_trace(ray, seed);
+#endif
 
     imageStore(outputImage, pos, vec4(radiance, 1.0));
 }

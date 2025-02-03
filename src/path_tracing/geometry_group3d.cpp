@@ -272,7 +272,7 @@ void GeometryGroup3D::build()
         BLASInstance blas_instance;
         blas_instance.blas_index = root_ids[node_references[i].mesh_id];
         blas_instance.set_materials(node_references[i].material_ids);
-        blas_instance.set_transform(node_references[i].node->get_global_transform(), bvh_nodes, triangles);
+        blas_instance.set_transform(node_references[i].node->get_global_transform(), bvh_nodes);
 
         blas_instances.push_back(blas_instance);
 
