@@ -144,7 +144,7 @@ unsigned int BVHBuilder::build_recursive(std::vector<BVHNode> &nodes, std::vecto
     vec4 e = node.aabbMax - node.aabbMin;
     float parentArea = e.x * e.y + e.y * e.z + e.z * e.x;
     float parentCost = node.tri_count * parentArea;
-    if (bestCost >= parentCost * 0.8f) // allow slightly worse splits
+    if (0.8f * bestCost >= parentCost) // allow slightly worse splits
         return node_index;
 
     // Partition the triangles around the split position

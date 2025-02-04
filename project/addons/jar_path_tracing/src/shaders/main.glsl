@@ -152,9 +152,22 @@ vec2 pcg2d(inout uvec2 seed) {
 	return vec2(seed) * 2.32830643654e-10; 
 }
 
+uvec2 prng_seed(vec2 pos, uint frame) {
+    uvec2 seed = uvec2(pos.xy);
+    seed = seed * 0x9e3779b9u + uvec2(frame);
+    seed ^= seed >> 16u;
+    return seed * 0x9e3779b9u;
+}
+
+vec2 box_muller(vec2 rands) {
+    float R = sqrt(-2.0f * log(rands.x));
+    float theta = 6.2831853f * rands.y;
+    return vec2(cos(theta), sin(theta));
+}
+
 vec3 sampleSky(const vec3 direction) {
     float t = 0.5 * (direction.y + 1.0);
-    return mix(vec3(0.95), vec3(0.9, 0.94, 1.0), t);
+    return mix(vec3(0.95), vec3(0.9, 0.94, 1.0), t) * 1.0f;
 }
 
 vec3 phongShading(const vec3 cameraPosition, const vec3 position, const vec3 normal, Light light) { 
@@ -384,9 +397,10 @@ layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 void main() {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
     if (pos.x >= params.width || pos.y >= params.height) return;
-    uvec2 seed = uvec2(gl_GlobalInvocationID.xy) ^ uvec2(camera.frame_index << 16, (camera.frame_index + 2378756348) << 16);
+    // uvec2 seed = uvec2(gl_GlobalInvocationID.xy) ^ uvec2(camera.frame_index << 16, (camera.frame_index + 2378756348) << 16);
+    uvec2 seed = prng_seed(gl_GlobalInvocationID.xy, camera.frame_index);
 
-    vec2 screenPos = vec2(pos) / vec2(params.width, params.height) * 2.0 - 1.0;
+    vec2 screenPos = vec2(pos + box_muller(pcg2d(seed) * 0.25)) / vec2(params.width, params.height) * 2.0 - 1.0;
     vec4 ndcPos = vec4(screenPos.x, -screenPos.y, 1.0, 1.0);
     vec4 worldPos = camera.ivp * ndcPos;
     worldPos /= worldPos.w;
@@ -394,6 +408,8 @@ void main() {
     // Light light = {vec4(0.0, 4.0, 0.0, 1.0), vec4(1.0, 1.0, 1.0, 1.0);
     Ray ray;
     ray.o = camera.position.xyz;
+
+
     ray.d = normalize(worldPos.xyz - camera.position.xyz);
     ray.rD = 1.0 / ray.d;
     
