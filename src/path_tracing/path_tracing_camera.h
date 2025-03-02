@@ -2,7 +2,7 @@
 #define PATH_TRACING_CAMERA_H
 
 #include "geometry_group3d.h"
-#include "jarcs/include/jarcs.h"
+#include "gdcs/include/gdcs.h"
 #include "progressive_rendering.h"
 #include "render_parameters.h"
 #include <godot_cpp/classes/engine.hpp>
@@ -16,6 +16,7 @@
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/projection.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
+#include <godot_cpp/classes/display_server.hpp>
 
 using namespace godot;
 
@@ -51,8 +52,8 @@ class PathTracingCamera : public Node3D
     float get_fov() const;
     void set_fov(float value);
 
-    int get_num_bounces() const;
-    void set_num_bounces(int value);
+    // int get_num_bounces() const;
+    // void set_num_bounces(int value);
 
     TextureRect *get_output_texture() const;
     void set_output_texture(TextureRect *value);
@@ -66,7 +67,7 @@ class PathTracingCamera : public Node3D
     void render();
 
     float fov = 90.0f;
-    int num_bounces = 4;
+    // int num_bounces = 4;
 
     ComputeShader *cs = nullptr;
     ProgressiveRendering *progressive_renderer = nullptr;
@@ -83,11 +84,13 @@ class PathTracingCamera : public Node3D
     RID output_texture_rid;
     RID render_parameters_rid;
     RID camera_rid;
-    RID triangles_rid;
+    RID triangles_geometry_rid;
+    RID triangles_data_rid;
     RID materials_rid;
     RID bvh_tree_rid;
     RID blas_rid;
     RID tlas_rid;
+    RID texture_array_rid;
 
     RenderingDevice *_rd;
 };

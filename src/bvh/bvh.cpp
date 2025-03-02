@@ -130,10 +130,12 @@ unsigned int BVHBuilder::build_recursive(std::vector<BVHNode> &nodes, std::vecto
     float bestSplit, bestCost = 1e30f;
     int bestAxis = -1;
 
-    for (int axis = 0; axis < 3; axis++) {
+    for (int axis = 0; axis < 3; axis++)
+    {
         float split;
         float cost = EvaluateSAH(triangles, node, axis, split);
-        if (cost < bestCost) {
+        if (cost < bestCost)
+        {
             bestCost = cost;
             bestSplit = split;
             bestAxis = axis;
@@ -144,7 +146,7 @@ unsigned int BVHBuilder::build_recursive(std::vector<BVHNode> &nodes, std::vecto
     vec4 e = node.aabbMax - node.aabbMin;
     float parentArea = e.x * e.y + e.y * e.z + e.z * e.x;
     float parentCost = node.tri_count * parentArea;
-    if (0.8f * bestCost >= parentCost) // allow slightly worse splits
+    if (bestCost * 0.8f >= parentCost) // allow slightly worse splits
         return node_index;
 
     // Partition the triangles around the split position
@@ -161,8 +163,18 @@ unsigned int BVHBuilder::build_recursive(std::vector<BVHNode> &nodes, std::vecto
 
     // Ensure the partitioning isn't degenerate
     int left_count = i - start;
+    // if (left_count == 0 || left_count == node.tri_count)
+    //     return node_index;
+
+    // median split if partitioning is degenerate
     if (left_count == 0 || left_count == node.tri_count)
-        return node_index;
+    {
+        int mid = start + (end - start) / 2;
+        std::nth_element(
+            triangles.begin() + start, triangles.begin() + mid, triangles.begin() + end,
+            [bestAxis](const Triangle &a, const Triangle &b) { return a.centroid[bestAxis] < b.centroid[bestAxis]; });
+        i = mid;
+    }
 
     // UtilityFunctions::print(node_index);
     nodes[node_index].left_child = build_recursive(nodes, triangles, start, i);
@@ -191,18 +203,20 @@ unsigned int BVHBuilder::BuildBVH(std::vector<BVHNode> &nodes, std::vector<Trian
             {
                 tri.vertices[j] =
                     vec4(vertices[indices[i + j]].x, vertices[indices[i + j]].y, vertices[indices[i + j]].z);
-                tri.centroid = (tri.vertices[0] + tri.vertices[1] + tri.vertices[2]) * 0.33333333f;
                 tri.normals[j] = vec4(normals[indices[i + j]].x, normals[indices[i + j]].y, normals[indices[i + j]].z);
                 tri.uvs[j] = vec2(uvs[indices[i + j]].x, uvs[indices[i + j]].y);
-                tri.materialIndex = l;
             }
+            tri.materialIndex = l;
+            tri.centroid = (tri.vertices[0] + tri.vertices[1] + tri.vertices[2]) * 0.33333333f;
             triangles.push_back(tri);
         }
     }
     int end = triangles.size();
 
+#ifdef VERBOSE_BVH_BUILDING
     UtilityFunctions::print("Build recursive using: start: " + godot::String(std::to_string(start).c_str()) +
                             ", end: " + godot::String(std::to_string(end).c_str()));
+#endif
 
     // Step 2: Build the BVH using the added triangles
     return build_recursive(nodes, triangles, start, end);
@@ -229,6 +243,7 @@ void BVHBuilder::print_tree(const std::vector<BVHNode> &nodes)
         unsigned int right_child = nodes[i].right_child;
         unsigned int first_tri_index = nodes[i].first_tri_index;
         unsigned int tri_count = nodes[i].tri_count;
+
         UtilityFunctions::print("{Node: l: " + godot::String(std::to_string(left_child).c_str()) +
                                 ", r: " + godot::String(std::to_string(right_child).c_str()) +
                                 ", t: " + godot::String(std::to_string(first_tri_index).c_str()) +

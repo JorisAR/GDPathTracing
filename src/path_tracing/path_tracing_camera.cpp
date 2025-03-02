@@ -6,9 +6,9 @@ void PathTracingCamera::_bind_methods()
     ClassDB::bind_method(D_METHOD("set_fov", "value"), &PathTracingCamera::set_fov);
     ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "fov"), "set_fov", "get_fov");
 
-    ClassDB::bind_method(D_METHOD("get_num_bounces"), &PathTracingCamera::get_num_bounces);
-    ClassDB::bind_method(D_METHOD("set_num_bounces", "value"), &PathTracingCamera::set_num_bounces);
-    ADD_PROPERTY(PropertyInfo(Variant::INT, "num_bounces"), "set_num_bounces", "get_num_bounces");
+    // ClassDB::bind_method(D_METHOD("get_num_bounces"), &PathTracingCamera::get_num_bounces);
+    // ClassDB::bind_method(D_METHOD("set_num_bounces", "value"), &PathTracingCamera::set_num_bounces);
+    // ADD_PROPERTY(PropertyInfo(Variant::INT, "num_bounces"), "set_num_bounces", "get_num_bounces");
 
     ClassDB::bind_method(D_METHOD("get_output_texture"), &PathTracingCamera::get_output_texture);
     ClassDB::bind_method(D_METHOD("set_output_texture", "value"), &PathTracingCamera::set_output_texture);
@@ -59,15 +59,15 @@ void PathTracingCamera::set_fov(float value)
     fov = value;
 }
 
-int PathTracingCamera::get_num_bounces() const
-{
-    return num_bounces;
-}
+// int PathTracingCamera::get_num_bounces() const
+// {
+//     return num_bounces;
+// }
 
-void PathTracingCamera::set_num_bounces(int value)
-{
-    num_bounces = value;
-}
+// void PathTracingCamera::set_num_bounces(int value)
+// {
+//     num_bounces = value;
+// }
 
 TextureRect *PathTracingCamera::get_output_texture() const
 {
@@ -101,11 +101,14 @@ void PathTracingCamera::init()
         return;
     }
 
+    //get resolution
+    auto resolution = DisplayServer::get_singleton()->window_get_size();
+
     geometry_group->build();
 
     { // setup parameters
-        render_parameters.width = 1920;
-        render_parameters.height = 1080;
+        render_parameters.width = resolution.x;
+        render_parameters.height = resolution.y;
         render_parameters.fov = fov;
         render_parameters.triangleCount = geometry_group->get_triangle_count();
         render_parameters.blasCount = geometry_group->get_blas_count();
@@ -123,13 +126,13 @@ void PathTracingCamera::init()
 
     Ref<RDTextureView> output_texture_view = memnew(RDTextureView);
     { // output texture
-        auto output_format = cs->create_texture_format(1920, 1080, RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM);
+        auto output_format = cs->create_texture_format(render_parameters.width, render_parameters.height, RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM);
         if (output_texture_rect == nullptr)
         {
             UtilityFunctions::printerr("No output texture set.");
             return;
         }
-        output_image = Image::create(1920, 1080, false, Image::FORMAT_RGBA8);
+        output_image = Image::create(render_parameters.width, render_parameters.height, false, Image::FORMAT_RGBA8);
         output_texture = ImageTexture::create_from_image(output_image);
         output_texture_rect->set_texture(output_texture);
         
@@ -138,17 +141,26 @@ void PathTracingCamera::init()
 
     //--------- SCENE STORAGE ---------
     {
-        triangles_rid = cs->create_storage_buffer_uniform(geometry_group->get_triangles_buffer(), 0, 1);
-        materials_rid = cs->create_storage_buffer_uniform(geometry_group->get_materials_buffer(), 1, 1);
-        bvh_tree_rid = cs->create_storage_buffer_uniform(geometry_group->get_bvh_buffer(), 2, 1);
-        blas_rid = cs->create_storage_buffer_uniform(geometry_group->get_blas_buffer(), 3, 1);
-        tlas_rid = cs->create_storage_buffer_uniform(geometry_group->get_tlas_buffer(), 4, 1);
+        triangles_geometry_rid = cs->create_storage_buffer_uniform(geometry_group->get_triangles_geometry_buffer(), 0, 1);
+        triangles_data_rid = cs->create_storage_buffer_uniform(geometry_group->get_triangles_data_buffer(), 1, 1);
+        materials_rid = cs->create_storage_buffer_uniform(geometry_group->get_materials_buffer(), 2, 1);
+        bvh_tree_rid = cs->create_storage_buffer_uniform(geometry_group->get_bvh_buffer(), 3, 1);
+        blas_rid = cs->create_storage_buffer_uniform(geometry_group->get_blas_buffer(), 4, 1);
+        tlas_rid = cs->create_storage_buffer_uniform(geometry_group->get_tlas_buffer(), 5, 1);
+    }
+    //textures
+    {
+        Ref<RDTextureView> texture_view = memnew(RDTextureView);
+        auto textures = geometry_group->get_textures_buffer();
+        auto resolution = geometry_group->get_texture_array_resolution();
+        auto textures_format = cs->create_texture_format(resolution, resolution, RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM);
+        texture_array_rid = cs->create_layered_image_uniform(textures, textures_format, texture_view, 0, 2);
     }
 
     cs->finish_create_uniforms();
 
     progressive_renderer = new ProgressiveRendering();
-    progressive_renderer->init(_rd, output_texture_rid, output_texture_view);
+    progressive_renderer->init(_rd, output_texture_rid, output_texture_view, resolution);
 }
 
 void PathTracingCamera::clear_compute_shader()
@@ -165,7 +177,7 @@ void PathTracingCamera::render()
     cs->update_storage_buffer_uniform(camera_rid, camera.to_packed_byte_array());
 
     // render
-    Vector2i Size = {1920, 1080};
+    Vector2i Size = {render_parameters.width, render_parameters.height};
     cs->compute({static_cast<int32_t>(std::ceil(Size.x / 32.0f)), static_cast<int32_t>(std::ceil(Size.y / 32.0f)), 1});
     
     {// post processing

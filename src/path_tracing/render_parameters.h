@@ -47,19 +47,25 @@ struct Camera
 struct GpuMaterial
 {
     BVH::vec4 albedo;
+    BVH::vec4 emission;
     float metallic;
     float roughness;
+    int albedo_texture_index;
+    float padding[5];
 };
 
 struct GpuTriangleGeometry
 {
-    BVH::vec4 v0, v1, v2;
+    BVH::vec4 vertices[3];
 };
 
 struct GpuTriangleData
 {
-    BVH::vec4 n0, n1, n2;
-    BVH::vec2 uv0, uv1, uv2;    
+    BVH::vec3 n1;
+    unsigned int material_index;
+    BVH::vec4 n2;
+    BVH::vec4 n3;
+    BVH::vec2 uvs[3];
 };
 
 

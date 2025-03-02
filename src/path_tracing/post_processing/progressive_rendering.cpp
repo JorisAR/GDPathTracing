@@ -11,13 +11,13 @@ ProgressiveRendering::~ProgressiveRendering()
         delete cs;
 }
 
-void ProgressiveRendering::init(RenderingDevice *rd, const RID original_screen_texture_rid, const Ref<RDTextureView> screen_texture_view)
+void ProgressiveRendering::init(RenderingDevice *rd, const RID original_screen_texture_rid, const Ref<RDTextureView> screen_texture_view, const Vector2i size)
 {
     // godot::UtilityFunctions::print(original_screen_texture_rid);
     screen_texture_rid = original_screen_texture_rid;
     { // setup parameters
-        render_parameters.width = 1920;
-        render_parameters.height = 1080;
+        render_parameters.width = size.x;
+        render_parameters.height = size.y;
         render_parameters.frame_count = 1;
     }
 
@@ -32,9 +32,9 @@ void ProgressiveRendering::init(RenderingDevice *rd, const RID original_screen_t
     }
 
     { // frame_buffer texture
-        auto frame_buffer_format = cs->create_texture_format(1920, 1080, RenderingDevice::DATA_FORMAT_R32G32B32A32_SFLOAT);
+        auto frame_buffer_format = cs->create_texture_format(size.x, size.y, RenderingDevice::DATA_FORMAT_R32G32B32A32_SFLOAT);
         Ref<RDTextureView> frame_buffer_texture_view = memnew(RDTextureView);
-        frame_buffer_image = Image::create(1920, 1080, false, Image::FORMAT_RGBAF);
+        frame_buffer_image = Image::create(size.x, size.y, false, Image::FORMAT_RGBAF);
         frame_buffer_texture = ImageTexture::create_from_image(frame_buffer_image);
         frame_buffer_rid = cs->create_image_uniform(frame_buffer_image, frame_buffer_format, frame_buffer_texture_view, 2, 0);
     }
@@ -61,6 +61,6 @@ void ProgressiveRendering::render(Transform3D camera_transform)
     cs->update_storage_buffer_uniform(render_parameters_rid, render_parameters.to_packed_byte_array());
 
     // render
-    Vector2i Size = {1920, 1080};
+    Vector2i Size = {render_parameters.width, render_parameters.height};
     cs->compute({static_cast<int32_t>(std::ceil(Size.x / 32.0f)), static_cast<int32_t>(std::ceil(Size.y / 32.0f)), 1});
 }

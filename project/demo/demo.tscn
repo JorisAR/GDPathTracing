@@ -1,10 +1,13 @@
-[gd_scene load_steps=13 format=3 uid="uid://dopxpjgtfffh4"]
+[gd_scene load_steps=16 format=3 uid="uid://dopxpjgtfffh4"]
 
 [ext_resource type="Script" path="res://demo/movable_camera.gd" id="2_kdd2p"]
-[ext_resource type="Texture2D" uid="uid://ccjsyuvc2x8oj" path="res://addons/jar_path_tracing/icons/terrain.svg" id="2_nwev3"]
-[ext_resource type="ArrayMesh" uid="uid://c8s1c6pob6ry1" path="res://demo/suzanne.obj" id="3_rovw5"]
-[ext_resource type="ArrayMesh" uid="uid://teo4lnhxisnh" path="res://demo/cornell.obj" id="4_5j87i"]
+[ext_resource type="Texture2D" uid="uid://cvgntl8w78ick" path="res://addons/jar_path_tracing/icons/icon.png" id="3_h18a1"]
+[ext_resource type="Texture2D" uid="uid://dviwig0ukucwn" path="res://demo/materials/grass_wales_diffuse.png" id="3_lodvb"]
+[ext_resource type="ArrayMesh" uid="uid://c8s1c6pob6ry1" path="res://demo/geometry/suzanne.obj" id="3_rovw5"]
+[ext_resource type="ArrayMesh" uid="uid://teo4lnhxisnh" path="res://demo/geometry/cornell.obj" id="4_5j87i"]
 [ext_resource type="Script" path="res://demo/fps_meter.gd" id="4_w0fmn"]
+
+[sub_resource type="CompressedTexture2D" id="CompressedTexture2D_ewjki"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_tctin"]
 
@@ -17,13 +20,17 @@ sky = SubResource("Sky_vgllt")
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_avnmi"]
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_p1ocp"]
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ahy1k"]
+albedo_texture = ExtResource("3_lodvb")
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_yu010"]
-albedo_color = Color(0.379, 1, 0.19, 1)
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_3ix6a"]
+albedo_color = Color(1, 0.16, 0.16, 1)
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_bpv2d"]
-albedo_color = Color(1, 0.19, 0.19, 1)
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_spnlb"]
+albedo_color = Color(0.42, 1, 0.13, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_qeiev"]
+albedo_texture = ExtResource("3_h18a1")
 
 [node name="Demo" type="Node3D"]
 
@@ -41,28 +48,30 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-texture = ExtResource("2_nwev3")
+texture = SubResource("CompressedTexture2D_ewjki")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_tn4qg")
 
 [node name="GeometryGroup3D" type="GeometryGroup3D" parent="."]
 default_material = SubResource("StandardMaterial3D_avnmi")
+texture_array_resolution = 1024
 
 [node name="MeshInstance3D4" type="MeshInstance3D" parent="GeometryGroup3D"]
 transform = Transform3D(-2.62268e-08, 0, -0.6, 0, 0.6, 0, 0.6, 0, -2.62268e-08, 0, 0, 0)
 mesh = ExtResource("4_5j87i")
-surface_material_override/0 = SubResource("StandardMaterial3D_p1ocp")
-surface_material_override/1 = SubResource("StandardMaterial3D_yu010")
-surface_material_override/2 = SubResource("StandardMaterial3D_bpv2d")
+surface_material_override/0 = SubResource("StandardMaterial3D_ahy1k")
+surface_material_override/1 = SubResource("StandardMaterial3D_3ix6a")
+surface_material_override/2 = SubResource("StandardMaterial3D_spnlb")
 
-[node name="MeshInstance3D5" type="MeshInstance3D" parent="GeometryGroup3D"]
+[node name="MeshInstance3D6" type="MeshInstance3D" parent="GeometryGroup3D"]
 transform = Transform3D(0.918709, 0, 0.394936, -0.0683152, 0.984926, 0.158916, -0.388983, -0.172978, 0.90486, -1.30439, -1.75104, -0.608295)
 mesh = ExtResource("3_rovw5")
 
 [node name="MeshInstance3D7" type="MeshInstance3D" parent="GeometryGroup3D"]
 transform = Transform3D(1.44381, 0.158618, -0.332176, 0, 1.34457, 0.642048, 0.368104, -0.622146, 1.30289, 0.790388, -1.15649, -1.17417)
 mesh = ExtResource("3_rovw5")
+surface_material_override/0 = SubResource("StandardMaterial3D_qeiev")
 
 [node name="Label" type="Label" parent="."]
 offset_right = 40.0

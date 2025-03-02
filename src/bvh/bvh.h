@@ -11,6 +11,9 @@
 #include <godot_cpp/variant/vector3.hpp>
 #include <vector>
 
+//uncomment to print some info about bvh
+// #define VERBOSE_BVH_BUILDING
+
 using namespace godot;
 
 namespace BVH

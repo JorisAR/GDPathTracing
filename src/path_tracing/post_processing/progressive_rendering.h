@@ -1,7 +1,7 @@
 #ifndef PROGRESSIVE_RENDERING_H
 #define PROGRESSIVE_RENDERING_H
 
-#include "jarcs/include/jarcs.h"
+#include "gdcs/include/gdcs.h"
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/variant/transform3d.hpp>
@@ -13,8 +13,8 @@ class ProgressiveRendering
 
     struct RenderParameters // match the struct on the gpu
     {
-        unsigned int width;
-        unsigned int height;
+        int width;
+        int height;
         unsigned int frame_count;
 
         PackedByteArray to_packed_byte_array()
@@ -30,7 +30,7 @@ class ProgressiveRendering
     ProgressiveRendering();
     ~ProgressiveRendering();
 
-    void init(RenderingDevice *rd, const RID original_screen_texture_rid, const Ref<RDTextureView> screen_texture_view);
+    void init(RenderingDevice *rd, const RID original_screen_texture_rid, const Ref<RDTextureView> screen_texture_view, const Vector2i size);
 
     void render(Transform3D camera_transform);
 

@@ -1,10 +1,11 @@
 #[compute]
 #version 460
-
+#extension GL_GOOGLE_include_directive : enable
+// #extension GL_EXT_nonuniform_qualifier : enable
+// #extension GL_EXT_control_flow_attributes : enable
+// #extension GL_EXT_ray_query : enable
 // #define DEBUG_STEPS
 
-#include "camera_utils.glsl"
-#include "brdfs.glsl"
 
 
 // ----------------------------------- STRUCTS -----------------------------------
@@ -14,12 +15,17 @@ struct Light {
     vec4 color;
 };
 
-struct Triangle {
+
+struct TriangleGeometry {
     vec4 vertices[3];
-    vec4 center;
-    vec4 normals[3];
-    vec2 uvs[3];
+};
+
+struct TriangleData {
+    vec3 n0;
     uint materialIndex;
+    vec4 n1;
+    vec4 n2;
+    vec2 uvs[3];
 };
 
 struct Ray {
@@ -31,11 +37,14 @@ struct Ray {
 struct Material
 {
     vec4 diffuse_albedo;
+    vec4 emission; //rgb: color, w: multiplier.
     float metallic;
     float roughness;
+    int albedo_texture_id;
+    float padding[5];
     // float ior;
     // float transmission;
-    // float emission;
+    
 };
 
 struct BVHNode {
@@ -88,6 +97,7 @@ struct BLASInstance
     //have an array of material ids? say up to 4/8/16 or something
 };
 
+
 // ----------------------------------- GENERAL STORAGE -----------------------------------
 
 layout(set = 0, binding = 0) restrict uniform writeonly image2D outputImage;
@@ -112,32 +122,45 @@ layout(std430, set = 0, binding = 2) restrict buffer Camera {
 // ----------------------------------- STORAGE BUFFERS -----------------------------------
 
 
-layout(set = 1, binding = 0, std430) restrict buffer Triangles
+layout(set = 1, binding = 0, std430) restrict buffer TrianglesGeometry
 {
-    Triangle triangles[];
+    TriangleGeometry triangles_geometry[];
 };
 
-layout(set = 1, binding = 1, std430) restrict buffer Materials
+layout(set = 1, binding = 1, std430) restrict buffer TrianglesData
+{
+    TriangleData triangles_data[];
+};
+
+layout(set = 1, binding = 2, std430) restrict buffer Materials
 {
     Material materials[];
 };
 
-layout(set = 1, binding = 2, std430) restrict buffer BVHTree
+layout(set = 1, binding = 3, std430) restrict buffer BVHTree
 {
     BVHNode bvhTree[];
 };
 
-layout(set = 1, binding = 3, std430) restrict buffer BLASInstances
+layout(set = 1, binding = 4, std430) restrict buffer BLASInstances
 {
     BLASInstance blas_instances[];
 };
 
-layout(set = 1, binding = 4, std430) restrict buffer TLASInstances
+layout(set = 1, binding = 5, std430) restrict buffer TLASInstances
 {
     TLASNode tlas_nodes[];
 };
 
+// ----------------------------------- TEXTURES -----------------------------------
+
+layout(set = 2, binding = 0) uniform sampler2DArray textureArray;
+
 // ----------------------------------- FUNCTIONS -----------------------------------
+
+//brdfs
+#include "brdfs.glsl"
+
 
 vec2 pcg2d(inout uvec2 seed) {
 	// PCG2D, as described here: https://jcgt.org/published/0009/03/02/
@@ -170,43 +193,39 @@ vec3 sampleSky(const vec3 direction) {
     return mix(vec3(0.95), vec3(0.9, 0.94, 1.0), t) * 1.0f;
 }
 
-vec3 phongShading(const vec3 cameraPosition, const vec3 position, const vec3 normal, Light light) { 
-    vec3 lightDir = normalize(light.position.xyz - position); 
-    float diff = max(dot(normal, lightDir), 0.0); 
-    vec3 diffuse = diff * light.color.rgb; 
-    vec3 viewDir = normalize(-cameraPosition); 
-    vec3 reflectDir = reflect(lightDir, normal); 
-    float spec = pow(max(dot(viewDir, reflectDir), 0.0), 32.0); 
-    vec3 specular = spec * light.color.rgb; 
-    return diffuse + specular; 
-}
-
-
 ShadingInfo get_shading_data(const HitInfo h) {
     ShadingInfo s;
-    Triangle tri = triangles[h.triangle];
+    TriangleData tri = triangles_data[h.triangle];
     BLASInstance b = blas_instances[h.blas];
     Material material = materials[b.materials[tri.materialIndex]];
 
     s.position = (b.transform * vec4(h.position, 1.0)).xyz;//transform position to global space
-    s.out_dir = h.out_dir;
-    //vec2 uv = tri.uvs[0] * (1.0 - u - v) + tri.uvs[1] * u + tri.uvs[2] * v;
+    s.out_dir = normalize((b.transform * vec4(h.out_dir, 0.0)).xyz);
     float u = h.barycentrics.x;
     float v = h.barycentrics.y;
-    s.normal = (tri.normals[0] * (1.0 - u - v) + tri.normals[1] * u + tri.normals[2] * v).xyz;//transform normal to global space
-    s.normal = (b.transform * vec4(s.normal, 0.0)).xyz;
-    if(!h.front) s.normal = -s.normal;
-    s.lambert_out = 1.0; //specularity i think
-    s.emission = vec3(0);
-    s.fresnel_0 = vec3(0); //unsure
-    s.diffuse_albedo = material.diffuse_albedo.rgb;
-    
+
+    vec2 uv = tri.uvs[0] * (1.0 - u - v) + tri.uvs[1] * u + tri.uvs[2] * v;
+    s.normal = tri.n0 * (1.0 - u - v) + tri.n1.xyz * u + tri.n2.xyz * v;//transform normal to global space
+    s.normal = normalize((b.transform * vec4(s.normal, 0.0)).xyz);
+    s.normal = h.front ? s.normal : -s.normal;
+
+    s.lambert_out = dot(s.normal, s.out_dir);
+    s.emission = material.emission.xyz * max(0, material.emission.w);
+    vec3 albedo = material.diffuse_albedo.rgb;
+    if(material.albedo_texture_id >= 0)
+        albedo *= texture(textureArray, vec3(uv, material.albedo_texture_id)).rgb;
+
+    float metalicity = material.metallic;
+    s.fresnel_0 = mix(vec3(0.02), albedo, metalicity);
+    s.diffuse_albedo = albedo - metalicity * albedo;
+    s.roughness = max(0.006, material.roughness);   
    
     return s;
 }
 
 bool intersectTriangle(const Ray ray, const uint tri_index, in out HitInfo hitInfo) {
-    Triangle tri = triangles[tri_index];
+    hitInfo.steps++;
+    TriangleGeometry tri = triangles_geometry[tri_index];
     vec3 v0 = tri.vertices[0].xyz;
     vec3 v1 = tri.vertices[1].xyz;
     vec3 v2 = tri.vertices[2].xyz;
@@ -234,7 +253,7 @@ bool intersectTriangle(const Ray ray, const uint tri_index, in out HitInfo hitIn
     hitInfo.triangle = tri_index;
     hitInfo.barycentrics = vec2(u, v);
     hitInfo.out_dir = -ray.d;
-    vec3 geometricNormal = normalize(cross(edge1, edge2));
+    vec3 geometricNormal = cross(edge1, edge2);
     hitInfo.front = (dot(geometricNormal, ray.d) > 0.0);
     return true;
 }
@@ -258,7 +277,7 @@ bool ray_trace_blas(const uint root, const Ray ray, in out HitInfo hitInfo)
 
     while (stackPtr > 0) {
         BVHNode node = bvhTree[stack[--stackPtr]];
-        hitInfo.steps++;
+        // hitInfo.steps++;
 
         if (node.tri_count > 0) { //isleaf
             for (uint i = 0; i < node.tri_count; i++) {
@@ -294,7 +313,7 @@ bool ray_trace_tlas(const Ray ray, inout HitInfo hitInfo)
 
     while (stackPtr > 0) {
         TLASNode node = tlas_nodes[stack[--stackPtr]];
-        hitInfo.steps++;
+        // hitInfo.steps++;
 
         if(node.leftRight == 0){
             BLASInstance b = blas_instances[node.blas];
@@ -315,12 +334,8 @@ bool ray_trace_tlas(const Ray ray, inout HitInfo hitInfo)
         uint right = node.leftRight >> 16;
         TLASNode childL = tlas_nodes[left];
         TLASNode childR = tlas_nodes[right];
-
-        // Intersect with child AABBs
         float d1 = intersectAABB(ray, childL.aabbMin.xyz, childL.aabbMax.xyz);
         float d2 = intersectAABB(ray, childR.aabbMin.xyz, childR.aabbMax.xyz);
-
-        // Only push children if their AABB is closer than the current hit
         bool leftValid = d1 < hitInfo.t;
         bool rightValid = d2 < hitInfo.t;
 
@@ -343,20 +358,13 @@ bool ray_trace(const Ray ray, out ShadingInfo s) {
     bool hit = ray_trace_tlas(ray, hitInfo);
 
 #ifdef DEBUG_STEPS    
-    s.emission = vec3(clamp(hitInfo.steps / 64.0f, 0, 1));
-    // s.emission = vec3(1,0,1);
+    s.emission = vec3(clamp(hitInfo.steps / 256.0f, 0, 1));
     return false;
 #endif
-
     if(hit)
     {
-        // Material material = materials[hitInfo.materialIndex];
-        // color = material.albedo.rgb;
-        // vec3 cameraPosition = camera.position.xyz;
-        // color = color * phongShading(cameraPosition, hitInfo.position, hitInfo.normal, light);
         s = get_shading_data(hitInfo);
         return true;
-        // color = vec3(material.roughness);
     } else {
         s.emission = sampleSky(ray.d);        
         return false;
@@ -372,19 +380,17 @@ vec3 path_trace(Ray ray, inout uvec2 seed) {
         bool hit = ray_trace(ray, s);
         radiance += throughput * s.emission;
         if(hit) {
-            // return s.diffuse_albedo;
-            throughput *= s.diffuse_albedo;            
+			ray.o = s.position + s.normal * 0.001;
+			ray.d = sample_brdf(s, pcg2d(seed));
+            ray.rD = 1.0 / ray.d;
 
-            ray.o = s.position + s.normal * 0.001;
-            mat3 shading_to_world_space = get_shading_space(s.normal);
-            vec3 sampled_dir = sample_hemisphere_psa(pcg2d(seed));
-            ray.d = shading_to_world_space * sampled_dir;
-            ray.rD = 1.0 / ray.d;          
+			float density = get_brdf_density(s, ray.d);
+			float lambert_in = dot(s.normal, ray.d);
+			if (lambert_in <= 0.0)
+				break;
 
-
+			throughput *= brdf(s, ray.d) * lambert_in / density;
         } else {
-            // return s.emission;
-            // return vec3(0);
             break;
         }
     }
@@ -409,11 +415,8 @@ void main() {
     Ray ray;
     ray.o = camera.position.xyz;
 
-
     ray.d = normalize(worldPos.xyz - camera.position.xyz);
     ray.rD = 1.0 / ray.d;
-    
-
     
 #ifdef DEBUG_STEPS
     ShadingInfo s;

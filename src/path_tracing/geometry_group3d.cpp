@@ -1,6 +1,6 @@
 #include "geometry_group3d.h"
 
-GeometryGroup3D::GeometryGroup3D()
+GeometryGroup3D::GeometryGroup3D() : texture_array_resolution(512) // Initialize with default value
 {
 }
 
@@ -37,9 +37,14 @@ template <typename T> PackedByteArray get_buffer(const std::vector<T> &vec)
     return byte_array;
 }
 
-PackedByteArray GeometryGroup3D::get_triangles_buffer()
+PackedByteArray GeometryGroup3D::get_triangles_geometry_buffer()
 {
-    return get_buffer(triangles);
+    return get_buffer(triangles_geometry);
+}
+
+PackedByteArray GeometryGroup3D::get_triangles_data_buffer()
+{
+    return get_buffer(triangles_data);
 }
 
 PackedByteArray GeometryGroup3D::get_materials_buffer()
@@ -62,6 +67,11 @@ PackedByteArray GeometryGroup3D::get_tlas_buffer()
     return get_buffer(tlas_nodes);
 }
 
+std::vector<Ref<Image>> GeometryGroup3D::get_textures_buffer()
+{
+    return textures;
+}
+
 Ref<StandardMaterial3D> GeometryGroup3D::get_default_material() const
 {
     return default_material;
@@ -72,12 +82,26 @@ void GeometryGroup3D::set_default_material(Ref<StandardMaterial3D> value)
     default_material = value;
 }
 
+int GeometryGroup3D::get_texture_array_resolution() const
+{
+    return texture_array_resolution;
+}
+
+void GeometryGroup3D::set_texture_array_resolution(int value)
+{
+    texture_array_resolution = value;
+}
+
 void GeometryGroup3D::_bind_methods()
 {
     ClassDB::bind_method(D_METHOD("get_default_material"), &GeometryGroup3D::get_default_material);
     ClassDB::bind_method(D_METHOD("set_default_material", "value"), &GeometryGroup3D::set_default_material);
     ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "default_material", PROPERTY_HINT_RESOURCE_TYPE, "StandardMaterial3D"),
                  "set_default_material", "get_default_material");
+
+    ClassDB::bind_method(D_METHOD("get_texture_array_resolution"), &GeometryGroup3D::get_texture_array_resolution);
+    ClassDB::bind_method(D_METHOD("set_texture_array_resolution", "value"), &GeometryGroup3D::set_texture_array_resolution);
+    ADD_PROPERTY(PropertyInfo(Variant::INT, "texture_array_resolution"), "set_texture_array_resolution", "get_texture_array_resolution");
 }
 
 void GeometryGroup3D::_notification(int p_what)
@@ -96,21 +120,31 @@ unsigned int GeometryGroup3D::get_material_index(const Ref<Material> &material)
 {
     // find it in initial references
     for (size_t i = 0; i < initial_material_references.size(); i++)
-    {
         if (initial_material_references[i].ptr() == material.ptr())
-        {
-            return i + 1;
-        }
-    }
-    //try to convert and return its index, else return default material index.
+            return i;
+        
+    
+    // try to convert and return its index, else return default material index.
     Ref<StandardMaterial3D> new_material = Ref<StandardMaterial3D>(Object::cast_to<StandardMaterial3D>(*material));
-    if(new_material.is_null())
-    {
+    if (new_material.is_null())
         return 0;
-    }
+        
     initial_material_references.push_back(material);
     material_references.push_back(new_material);
     return material_references.size() - 1;
+}
+
+int GeometryGroup3D::get_texture_index(const Ref<Texture2D> &texture)
+{
+    if (texture.is_null())
+        return -1;
+
+    for (size_t i = 0; i < texture_references.size(); i++)
+        if (texture_references[i].ptr() == texture.ptr())
+            return i;
+
+    texture_references.push_back(texture);
+    return texture_references.size() - 1;
 }
 
 void GeometryGroup3D::collect_mesh_instances()
@@ -163,7 +197,6 @@ void GeometryGroup3D::collect_mesh_instances()
                     {
                         for (size_t i = 0; i < mesh_instance->get_surface_override_material_count(); i++)
                         {
-                            // todo add indidivual materials here
                             material_ids.push_back(get_material_index(mesh_instance->get_surface_override_material(i)));
                         }
                     }
@@ -198,6 +231,7 @@ void GeometryGroup3D::build()
     final_geometry_references.clear();
     node_references.clear();
     material_references.clear();
+    initial_material_references.clear();
     tlas_nodes.clear();
     bvh_nodes.clear();
     blas_instances.clear();
@@ -209,6 +243,7 @@ void GeometryGroup3D::build()
         default_material->set_roughness(0.5f);
         default_material->set_metallic(0.0f);
     }
+    initial_material_references.push_back(default_material);
     material_references.push_back(default_material);
 
     collect_mesh_instances();
@@ -226,10 +261,12 @@ void GeometryGroup3D::build()
             final_geometry_references.push_back(arr_mesh);
         }
     }
+#ifdef VERBOSE_BVH_BUILDING
     UtilityFunctions::print("geometry, nodes, material references:");
     UtilityFunctions::print(final_geometry_references.size());
     UtilityFunctions::print(node_references.size());
     UtilityFunctions::print(material_references.size());
+#endif
 
     { // materials
         materials.clear();
@@ -240,12 +277,29 @@ void GeometryGroup3D::build()
             if (material.is_valid())
             {
                 GpuMaterial gpu_material;
-                gpu_material.albedo =
-                    BVH::vec4(material->get_albedo().r, material->get_albedo().g, material->get_albedo().b, 1.0f);
+                auto a = material->get_albedo();
+                gpu_material.albedo = BVH::vec4(a.r, a.g, a.b, 1.0f);
                 gpu_material.metallic = material->get_metallic();
                 gpu_material.roughness = material->get_roughness();
+                auto e = material->get_emission();
+
+                gpu_material.emission = BVH::vec4(e.r, e.g, e.b, material->get_emission_energy_multiplier());
+
+                gpu_material.albedo_texture_index =
+                    get_texture_index(material->get_texture(BaseMaterial3D::TEXTURE_ALBEDO));
                 materials.push_back(gpu_material);
             }
+        }
+        // //combine textures into a single large texture
+        for (size_t i = 0; i < texture_references.size(); i++){
+            auto image = texture_references[i]->get_image();
+            image->clear_mipmaps();
+            image->decompress();
+            image->resize(texture_array_resolution, texture_array_resolution);
+            textures.push_back(image);
+        }
+        if(textures.size() <= 0){
+            textures.push_back(Image::create(texture_array_resolution, texture_array_resolution, false, Image::FORMAT_RGBA8));
         }
     }
     // build the bvh for each unique mesh
@@ -257,10 +311,12 @@ void GeometryGroup3D::build()
         unsigned int root = builder.BuildBVH(bvh_nodes, triangles, final_geometry_references[i]);
         root_ids.push_back(root);
     }
+#ifdef VERBOSE_BVH_BUILDING
     UtilityFunctions::print("nodes, triangles, materials:");
     UtilityFunctions::print(bvh_nodes.size());
     UtilityFunctions::print(triangles.size());
     UtilityFunctions::print(materials.size());
+#endif
 
     // create blas instance for each node:
     for (size_t i = 0; i < node_references.size(); i++)
@@ -275,20 +331,36 @@ void GeometryGroup3D::build()
         blas_instance.set_transform(node_references[i].node->get_global_transform(), bvh_nodes);
 
         blas_instances.push_back(blas_instance);
-
+#ifdef VERBOSE_BVH_BUILDING
         UtilityFunctions::print("root:");
         UtilityFunctions::print(blas_instance.blas_index);
         UtilityFunctions::print(blas_instance.material[0]);
         UtilityFunctions::print(blas_instance.material[1]);
         UtilityFunctions::print(blas_instance.material[2]);
+#endif
     }
+#ifdef VERBOSE_BVH_BUILDING
     UtilityFunctions::print("Blas:");
     UtilityFunctions::print(blas_instances.size());
+#endif
 
     // builder.print_tree(bvh_nodes);
 
     // create tlas tree; https://jacco.ompf2.com/2022/05/13/how-to-build-a-bvh-part-6-all-together-now/
     TLAS tlas;
     tlas.build(tlas_nodes, blas_instances);
+#ifdef VERBOSE_BVH_BUILDING
     tlas.print_tree(tlas_nodes);
+#endif
+
+    triangles_geometry.clear();
+    triangles_data.clear();
+    // once done building, populate the GPU triangle arrays
+    for (size_t i = 0; i < triangles.size(); i++)
+    {
+        Triangle tri = triangles[i];
+        triangles_geometry.push_back(GpuTriangleGeometry{tri.vertices[0], tri.vertices[1], tri.vertices[2]});
+        triangles_data.push_back(GpuTriangleData{tri.normals[0], tri.materialIndex, tri.normals[1], tri.normals[2],
+                                                 tri.uvs[0], tri.uvs[1], tri.uvs[2]});
+    }
 }
