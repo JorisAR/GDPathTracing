@@ -1,5 +1,8 @@
 # Godot Pathtracing Plugin
 
+![Banner Image](https://github.com/JorisAR/GDPathTracing/blob/main/banner.png?raw=true)
+
+
 This project aims to add a basic Pathtracer to godot using compute shaders. It's primarily intended for educational and experimental purposes.
 
 ## Features

@@ -52,7 +52,7 @@ float BVHBuilder::EvaluateSAH(const std::vector<Triangle> &triangles, const BVHN
     float maxBound = node.aabbMax[axis];
     float range = maxBound - minBound;
     if (range < 1e-6f)
-        return FLT_MAX; // Degenerate node
+        return 1e+30f; // Degenerate node
 
     float invRange = 1.0f / range;
 
@@ -69,7 +69,7 @@ float BVHBuilder::EvaluateSAH(const std::vector<Triangle> &triangles, const BVHN
     }
 
     // Accumulate from left and right
-    float bestCost = FLT_MAX;
+    float bestCost =  1e+30f;
     BoundingBox leftAccum[BINS];
     int leftCount[BINS];
 

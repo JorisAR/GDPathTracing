@@ -23,9 +23,15 @@ sky = SubResource("Sky_vgllt")
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_avnmi"]
 
+[sub_resource type="PlaneMesh" id="PlaneMesh_oeqrt"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_1rqa4"]
+emission_enabled = true
+emission = Color(0.832472, 0.8072, 0.719802, 1)
+emission_energy_multiplier = 10.0
+
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_oeqrt"]
-metallic = 1.0
-roughness = 0.2
+roughness = 0.6
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_3ix6a"]
 albedo_color = Color(1, 0.16, 0.16, 1)
@@ -34,9 +40,10 @@ albedo_color = Color(1, 0.16, 0.16, 1)
 albedo_color = Color(0.42, 1, 0.13, 1)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ykvhj"]
+albedo_color = Color(0.8, 0.8, 0.8, 1)
 emission_enabled = true
-emission = Color(0.15, 0, 1, 1)
-emission_energy_multiplier = 4.0
+emission = Color(0.360742, 0.135649, 0.818479, 1)
+emission_energy_multiplier = 0.4
 
 [sub_resource type="Skin" id="Skin_d1m6b"]
 resource_name = "Skin"
@@ -132,16 +139,10 @@ normal_texture = ExtResource("8_tdg64")
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_xm42s"]
 albedo_texture = ExtResource("8_ykvhj")
 
-[sub_resource type="PlaneMesh" id="PlaneMesh_oeqrt"]
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_1rqa4"]
-emission_enabled = true
-emission = Color(0.832472, 0.8072, 0.719802, 1)
-emission_energy_multiplier = 10.0
-
 [node name="Demo" type="Node3D"]
 
 [node name="Camera3D" type="PathTracingCamera" parent="." node_paths=PackedStringArray("output_texture", "geometry_group")]
+fov = 79.5
 output_texture = NodePath("OutputTexture")
 geometry_group = NodePath("../GeometryGroup3D")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 9.7694)
@@ -164,6 +165,11 @@ environment = SubResource("Environment_tn4qg")
 default_material = SubResource("StandardMaterial3D_avnmi")
 texture_array_resolution = 1024
 
+[node name="Light" type="MeshInstance3D" parent="GeometryGroup3D"]
+transform = Transform3D(1, 0, 0, 0, -1, 1.50996e-07, 0, -1.50996e-07, -1, 0, 2.95581, 0)
+mesh = SubResource("PlaneMesh_oeqrt")
+surface_material_override/0 = SubResource("StandardMaterial3D_1rqa4")
+
 [node name="Box" type="MeshInstance3D" parent="GeometryGroup3D"]
 transform = Transform3D(-2.62268e-08, 0, -0.6, 0, 0.6, 0, 0.6, 0, -2.62268e-08, 0, 0, 0)
 mesh = ExtResource("4_5j87i")
@@ -172,7 +178,7 @@ surface_material_override/1 = SubResource("StandardMaterial3D_3ix6a")
 surface_material_override/2 = SubResource("StandardMaterial3D_spnlb")
 
 [node name="Suzanne" type="MeshInstance3D" parent="GeometryGroup3D"]
-transform = Transform3D(1.10245, -1.07288e-07, 0.473923, -0.0819782, 1.18191, 0.1907, -0.466779, -0.207574, 1.08583, -1.16402, -1.76329, -0.817381)
+transform = Transform3D(0.982635, -0.208021, 0.656626, 0.0853118, 1.17191, 0.243597, -0.68348, -0.152791, 0.974428, -1.16402, -1.55573, -0.923088)
 mesh = ExtResource("3_rovw5")
 surface_material_override/0 = SubResource("StandardMaterial3D_ykvhj")
 
@@ -183,11 +189,6 @@ skin = SubResource("Skin_d1m6b")
 skeleton = NodePath("")
 surface_material_override/0 = SubResource("StandardMaterial3D_ysg02")
 surface_material_override/1 = SubResource("StandardMaterial3D_xm42s")
-
-[node name="Light" type="MeshInstance3D" parent="GeometryGroup3D"]
-transform = Transform3D(2, 0, 0, 0, -2, 3.01992e-07, 0, -3.01992e-07, -2, 0, 1.86705, 0)
-mesh = SubResource("PlaneMesh_oeqrt")
-surface_material_override/0 = SubResource("StandardMaterial3D_1rqa4")
 
 [node name="Label" type="Label" parent="."]
 offset_right = 40.0

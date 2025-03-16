@@ -1,12 +1,7 @@
 #[compute]
 #version 460
-#extension GL_GOOGLE_include_directive : enable
-// #extension GL_EXT_nonuniform_qualifier : enable
-// #extension GL_EXT_control_flow_attributes : enable
-// #extension GL_EXT_ray_query : enable
+
 // #define DEBUG_STEPS
-
-
 
 // ----------------------------------- STRUCTS -----------------------------------
 
