@@ -30,7 +30,6 @@ void main() {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
     if (pos.x >= width || pos.y >= height) return;
 
-    // Accumulate radiance
     vec3 radiance = imageLoad(screenTexture, pos).rgb;
     if(frame_count > 1) {
         radiance += imageLoad(frameBuffer, pos).rgb;
@@ -41,12 +40,7 @@ void main() {
 
     float exposure = 1.0f;
 
-    // Apply ACES tone mapping
     vec3 color = acesFilm(avgRadiance * exposure);
 
-    // Optional gamma correction (if not using sRGB framebuffer)
-    // color = pow(color, vec3(1.0/2.2));
-
-    // Store final color
     imageStore(screenTexture, pos, vec4(color, 1.0));
 }

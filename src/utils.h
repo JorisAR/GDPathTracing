@@ -1,5 +1,5 @@
-#ifndef BHV_UTILS_H
-#define BHV_UTILS_H
+#ifndef UTILS_H
+#define UTILS_H
 
 #include <algorithm>
 #include <godot_cpp/variant/transform3d.hpp>
@@ -10,7 +10,7 @@
 
 using namespace godot;
 
-namespace BVH
+namespace Utils
 {
 inline void transform_to_float(float* target, const Transform3D &t)
 {
@@ -48,6 +48,6 @@ inline void projection_to_float(float* target, const Projection &t)
     }
 }
 
-} // namespace BVH
+} // namespace Utils
 
-#endif // BHV_UTILS_H
+#endif // UTILS_H

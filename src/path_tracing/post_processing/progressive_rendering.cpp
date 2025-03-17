@@ -11,7 +11,7 @@ ProgressiveRendering::~ProgressiveRendering()
         delete cs;
 }
 
-void ProgressiveRendering::init(RenderingDevice *rd, const RID original_screen_texture_rid, const Ref<RDTextureView> screen_texture_view, const Vector2i size)
+void ProgressiveRendering::init(RenderingDevice *rd, const RID original_screen_texture_rid, const Vector2i size)
 {
     // godot::UtilityFunctions::print(original_screen_texture_rid);
     screen_texture_rid = original_screen_texture_rid;

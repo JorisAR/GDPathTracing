@@ -3,6 +3,7 @@
 
 #include "geometry_group3d.h"
 #include "gdcs/include/gdcs.h"
+#include "temporal_reprojection.h"
 #include "progressive_rendering.h"
 #include "render_parameters.h"
 #include <godot_cpp/classes/engine.hpp>
@@ -15,6 +16,7 @@
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/projection.hpp>
+#include <godot_cpp/variant/transform3d.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/classes/display_server.hpp>
 
@@ -24,9 +26,15 @@ class PathTracingCamera : public Node3D
 {
     GDCLASS(PathTracingCamera, Node3D);
 
+  public:
+    enum Denoising {
+        PROGRESSIVE_RENDERING,
+        TEMPORAL_REPROJECTION,
+        NONE
+    };
+
     struct RenderParameters // match the struct on the gpu
     {
-
         Vector4 backgroundColor;
         int width;
         int height;
@@ -61,6 +69,9 @@ class PathTracingCamera : public Node3D
     GeometryGroup3D *get_geometry_group() const;
     void set_geometry_group(GeometryGroup3D *value);
 
+    Denoising get_denoising_mode() const;
+    void set_denoising_mode(Denoising mode);
+
   private:
     void init();
     void clear_compute_shader();
@@ -71,9 +82,11 @@ class PathTracingCamera : public Node3D
 
     ComputeShader *cs = nullptr;
     ProgressiveRendering *progressive_renderer = nullptr;
+    TemporalReprojection *temporal_reprojection = nullptr;
     GeometryGroup3D *geometry_group = nullptr;
     TextureRect *output_texture_rect = nullptr;
     Ref<Image> output_image;
+    Ref<Image> depth_image;
     Ref<ImageTexture> output_texture;
 
     RenderParameters render_parameters;
@@ -82,6 +95,7 @@ class PathTracingCamera : public Node3D
 
     // BUFFER IDs
     RID output_texture_rid;
+    RID depth_texture_rid;
     RID render_parameters_rid;
     RID camera_rid;
     RID triangles_geometry_rid;
@@ -93,6 +107,10 @@ class PathTracingCamera : public Node3D
     RID texture_array_rid;
 
     RenderingDevice *_rd;
+
+    Denoising denoising_mode = PROGRESSIVE_RENDERING; // Default option
 };
+
+VARIANT_ENUM_CAST(PathTracingCamera::Denoising);
 
 #endif // PATH_TRACING_CAMERA_H

@@ -2,7 +2,7 @@
 #define BHV_H
 
 #include "vec.h"
-#include "utils.h"
+#include "../utils.h"
 #include <algorithm>
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/variant/array.hpp>
@@ -81,8 +81,8 @@ struct BLASInstance
     // have an array of material ids? say up to 4/8/16 or something
     void set_transform(const godot::Transform3D &t, const std::vector<BVHNode> &nodes)
     {
-        transform_to_float(transform, t);  
-        transform_to_float(inverse_transform, t.affine_inverse());  
+        Utils::transform_to_float(transform, t);  
+        Utils::transform_to_float(inverse_transform, t.affine_inverse());  
         update_aabb(t, nodes[blas_index]);
     }
 

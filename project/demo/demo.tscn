@@ -1,14 +1,9 @@
-[gd_scene load_steps=24 format=3 uid="uid://dopxpjgtfffh4"]
+[gd_scene load_steps=17 format=3 uid="uid://dopxpjgtfffh4"]
 
 [ext_resource type="Script" uid="uid://c0626baj7yc8l" path="res://demo/movable_camera.gd" id="2_kdd2p"]
 [ext_resource type="ArrayMesh" uid="uid://c8s1c6pob6ry1" path="res://demo/geometry/suzanne.obj" id="3_rovw5"]
 [ext_resource type="ArrayMesh" uid="uid://teo4lnhxisnh" path="res://demo/geometry/cornell.obj" id="4_5j87i"]
-[ext_resource type="ArrayMesh" uid="uid://dit0uysonhldi" path="res://addons/gdquest_gobot/model/victory_gobot.obj" id="4_oeqrt"]
 [ext_resource type="Script" uid="uid://b7icuble3ehmr" path="res://demo/fps_meter.gd" id="4_w0fmn"]
-[ext_resource type="Texture2D" uid="uid://bt5o0sr6peltq" path="res://addons/gdquest_gobot/model/gobot_gobot_diffuse.png" id="6_1rqa4"]
-[ext_resource type="Texture2D" uid="uid://cgkj45d67dalm" path="res://addons/gdquest_gobot/model/gobot_gobot_roughness.png" id="7_xm42s"]
-[ext_resource type="Texture2D" uid="uid://d28w5bql3g21l" path="res://addons/gdquest_gobot/model/gobot_gobot_normal.png" id="8_tdg64"]
-[ext_resource type="Texture2D" uid="uid://pntb2e1p2qfe" path="res://addons/gdquest_gobot/textures/left_eye.png" id="8_ykvhj"]
 
 [sub_resource type="CompressedTexture2D" id="CompressedTexture2D_ewjki"]
 
@@ -45,99 +40,9 @@ emission_enabled = true
 emission = Color(0.360742, 0.135649, 0.818479, 1)
 emission_energy_multiplier = 0.4
 
-[sub_resource type="Skin" id="Skin_d1m6b"]
-resource_name = "Skin"
-bind_count = 25
-bind/0/name = &"Foot.L"
-bind/0/bone = -1
-bind/0/pose = Transform3D(1, -8.50629e-08, -2.01752e-08, -1.77636e-15, -0.230777, 0.973007, -8.74228e-08, -0.973007, -0.230777, -0.097547, 0.0216723, 0.0965178)
-bind/1/name = &"Foot.R"
-bind/1/bone = -1
-bind/1/pose = Transform3D(1, -8.50629e-08, -2.01752e-08, -1.77636e-15, -0.230777, 0.973007, -8.74228e-08, -0.973007, -0.230777, 0.097547, 0.0216723, 0.0965178)
-bind/2/name = &"Body"
-bind/2/bone = -1
-bind/2/pose = Transform3D(1, 0, 8.74228e-08, 0, 1, 0, -8.74228e-08, 0, 1, 0, -0.388826, 0)
-bind/3/name = &"Hips"
-bind/3/bone = -1
-bind/3/pose = Transform3D(1, 0, -6.3573e-08, 0, -1, 0, -6.3573e-08, 0, -1, 0, 0.388826, 0)
-bind/4/name = &"UpperLeg.L"
-bind/4/bone = -1
-bind/4/pose = Transform3D(1, 2.64443e-09, -1.1019e-10, 2.64672e-09, -0.999133, 0.0416328, 6.6197e-15, -0.0416328, -0.999133, -0.0975467, 0.31967, 0.0133203)
-bind/5/name = &"LowerLeg.L"
-bind/5/bone = -1
-bind/5/pose = Transform3D(1, 2.20243e-06, 2.25178e-06, 2.25178e-06, -0.999754, -0.0221546, 2.20243e-06, 0.0221546, -0.999754, -0.0975472, 0.224648, -0.00100509)
-bind/6/name = &"UpperLeg.R"
-bind/6/bone = -1
-bind/6/pose = Transform3D(1, 2.64443e-09, -1.1019e-10, 2.64672e-09, -0.999133, 0.0416328, 6.6197e-15, -0.0416328, -0.999133, 0.0975467, 0.31967, 0.0133203)
-bind/7/name = &"LowerLeg.R"
-bind/7/bone = -1
-bind/7/pose = Transform3D(1, -2.20243e-06, -2.25178e-06, -2.25178e-06, -0.999754, -0.0221546, -2.20243e-06, 0.0221546, -0.999754, 0.0975472, 0.224648, -0.00100509)
-bind/8/name = &"UpperArm.L"
-bind/8/bone = -1
-bind/8/pose = Transform3D(0.0145381, 8.10624e-07, 0.999894, 0.999894, -8.77076e-07, -0.014538, 8.63585e-07, 1, -8.21961e-07, -0.00187666, -0.129037, -0.525156)
-bind/9/name = &"LowerArm.L"
-bind/9/bone = -1
-bind/9/pose = Transform3D(-0.0122609, -8.1303e-14, 0.999925, 0.999925, -1.59748e-09, 0.012261, -1.64104e-11, 1, 1.3476e-09, 0.00523283, -0.265227, -0.525155)
-bind/10/name = &"Thumb_1.L"
-bind/10/bone = -1
-bind/10/pose = Transform3D(-0.000404652, 0.70459, 0.709614, 0.993561, -0.0801157, 0.0801152, 0.1133, 0.705077, -0.700021, -0.372523, -0.368165, -0.356062)
-bind/11/name = &"Thumb_2.L"
-bind/11/bone = -1
-bind/11/pose = Transform3D(0.00189944, 0.731568, 0.681765, 0.998548, -0.038087, 0.0380874, 0.0538298, 0.680703, -0.730579, -0.385119, -0.462633, -0.314343)
-bind/12/name = &"Finger_1_1.L"
-bind/12/bone = -1
-bind/12/pose = Transform3D(7.73938e-05, -0.000674743, 1, 0.993734, 0.111766, -1.3558e-06, -0.111766, 0.993734, 0.000679151, -0.0297844, -0.483879, -0.514838)
-bind/13/name = &"Finger_1_2.L"
-bind/13/bone = -1
-bind/13/pose = Transform3D(1.31396e-05, -0.000679274, 1, 0.999813, 0.0193399, 1.40641e-07, -0.0193399, 0.999813, 0.0006794, -0.029749, -0.522224, -0.565583)
-bind/14/name = &"Finger_2_1.L"
-bind/14/bone = -1
-bind/14/pose = Transform3D(7.74373e-05, -0.000674738, 1, 0.993734, 0.111766, -1.398e-06, -0.111766, 0.993734, 0.000679151, 0.0397597, -0.48388, -0.51479)
-bind/15/name = &"Finger_2_2.L"
-bind/15/bone = -1
-bind/15/pose = Transform3D(1.31396e-05, -0.000679274, 1, 0.999813, 0.01934, 1.42228e-07, -0.0193399, 0.999813, 0.0006794, 0.0397952, -0.522224, -0.565536)
-bind/16/name = &"UpperArm.R"
-bind/16/bone = -1
-bind/16/pose = Transform3D(0.0145381, -8.73961e-07, -0.999894, -0.999894, -8.77065e-07, -0.014538, -8.62677e-07, 1, -8.84353e-07, 0.00187669, -0.129037, -0.525156)
-bind/17/name = &"LowerArm.R"
-bind/17/bone = -1
-bind/17/pose = Transform3D(-0.0122609, 8.13065e-15, -0.999925, -0.999925, -1.56172e-09, 0.012261, 2.78497e-11, 1, 2.28516e-09, -0.00523283, -0.265227, -0.525155)
-bind/18/name = &"Thumb_1.R"
-bind/18/bone = -1
-bind/18/pose = Transform3D(-0.000404652, -0.70459, -0.709614, -0.993561, -0.0801157, 0.0801152, -0.1133, 0.705077, -0.700021, 0.372523, -0.368165, -0.356062)
-bind/19/name = &"Thumb_2.R"
-bind/19/bone = -1
-bind/19/pose = Transform3D(0.00189944, -0.731568, -0.681765, -0.998548, -0.038087, 0.0380874, -0.0538298, 0.680703, -0.730579, 0.385119, -0.462633, -0.314343)
-bind/20/name = &"Finger_1_1.R"
-bind/20/bone = -1
-bind/20/pose = Transform3D(7.7392e-05, 0.000674743, -1, -0.993734, 0.111766, -1.35937e-06, 0.111766, 0.993734, 0.000679152, 0.0297844, -0.483879, -0.514838)
-bind/21/name = &"Finger_1_2.R"
-bind/21/bone = -1
-bind/21/pose = Transform3D(1.31396e-05, 0.000679274, -1, -0.999813, 0.0193399, 1.35088e-07, 0.0193399, 0.999813, 0.000679401, 0.029749, -0.522224, -0.565583)
-bind/22/name = &"Finger_2_1.R"
-bind/22/bone = -1
-bind/22/pose = Transform3D(7.74355e-05, 0.000674738, -1, -0.993734, 0.111766, -1.4016e-06, 0.111766, 0.993734, 0.000679152, -0.0397597, -0.48388, -0.51479)
-bind/23/name = &"Finger_2_2.R"
-bind/23/bone = -1
-bind/23/pose = Transform3D(1.31396e-05, 0.000679274, -1, -0.999813, 0.01934, 1.36656e-07, 0.0193399, 0.999813, 0.000679401, -0.0397952, -0.522224, -0.565536)
-bind/24/name = &"Head"
-bind/24/bone = -1
-bind/24/pose = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.578803, 0)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ysg02"]
-resource_name = "GobotMat"
-cull_mode = 2
-albedo_texture = ExtResource("6_1rqa4")
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_j5lb4"]
 metallic = 1.0
-metallic_texture = ExtResource("7_xm42s")
-metallic_texture_channel = 2
-roughness_texture = ExtResource("7_xm42s")
-roughness_texture_channel = 1
-normal_enabled = true
-normal_texture = ExtResource("8_tdg64")
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_xm42s"]
-albedo_texture = ExtResource("8_ykvhj")
+roughness = 0.16
 
 [node name="Demo" type="Node3D"]
 
@@ -182,13 +87,10 @@ transform = Transform3D(0.982635, -0.208021, 0.656626, 0.0853118, 1.17191, 0.243
 mesh = ExtResource("3_rovw5")
 surface_material_override/0 = SubResource("StandardMaterial3D_ykvhj")
 
-[node name="Gobot" type="MeshInstance3D" parent="GeometryGroup3D"]
-transform = Transform3D(1.76353, 0, -0.943378, 0, 2, 0, 0.943378, 0, 1.76353, 1.06218, -2.99723, 0.023558)
-mesh = ExtResource("4_oeqrt")
-skin = SubResource("Skin_d1m6b")
-skeleton = NodePath("")
-surface_material_override/0 = SubResource("StandardMaterial3D_ysg02")
-surface_material_override/1 = SubResource("StandardMaterial3D_xm42s")
+[node name="Suzanne2" type="MeshInstance3D" parent="GeometryGroup3D"]
+transform = Transform3D(0.934979, 0.0872355, -0.747128, 0.0853118, 1.17191, 0.243597, 0.74735, -0.242915, 0.906899, 1.27032, -0.951083, -0.923088)
+mesh = ExtResource("3_rovw5")
+surface_material_override/0 = SubResource("StandardMaterial3D_j5lb4")
 
 [node name="Label" type="Label" parent="."]
 offset_right = 40.0

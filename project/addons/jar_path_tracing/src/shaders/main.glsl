@@ -95,9 +95,10 @@ struct BLASInstance
 
 // ----------------------------------- GENERAL STORAGE -----------------------------------
 
-layout(set = 0, binding = 0) restrict uniform writeonly image2D outputImage;
+layout(set = 0, binding = 0, rgba8) restrict uniform writeonly image2D outputImage;
+layout(set = 0, binding = 1, r32f) restrict uniform writeonly image2D depthBuffer;
 
-layout(std430, set = 0, binding = 1) restrict buffer Params {
+layout(std430, set = 0, binding = 2) restrict buffer Params {
     vec4 background; //rgb, brightness
     int width;
     int height;
@@ -106,11 +107,13 @@ layout(std430, set = 0, binding = 1) restrict buffer Params {
     uint blas_count;
 } params;
 
-layout(std430, set = 0, binding = 2) restrict buffer Camera {
+layout(std430, set = 0, binding = 3) restrict buffer Camera {
     mat4 vp;
     mat4 ivp;
     vec4 position;
     uint frame_index;
+    float near;
+    float far;
 } camera;
 
 
@@ -366,7 +369,8 @@ bool ray_trace(const Ray ray, out ShadingInfo s) {
     }
 }
 
-vec3 path_trace(Ray ray, inout uvec2 seed) {
+vec3 path_trace(Ray ray, inout uvec2 seed, out float depth) {
+    depth = camera.far;
     vec3 radiance = vec3(0.0);
     vec3 throughput = vec3(1.0f);
     // [[unroll]]
@@ -375,6 +379,9 @@ vec3 path_trace(Ray ray, inout uvec2 seed) {
         bool hit = ray_trace(ray, s);
         radiance += throughput * s.emission;
         if(hit) {
+            if(i == 0)
+                depth = length(s.position - ray.o);
+
 			ray.o = s.position + s.normal * 0.001;
 			ray.d = sample_brdf(s, pcg2d(seed));
             ray.rD = 1.0 / ray.d;
@@ -412,15 +419,18 @@ void main() {
 
     ray.d = normalize(worldPos.xyz - camera.position.xyz);
     ray.rD = 1.0 / ray.d;
-    
+    float depth = camera.far;
 #ifdef DEBUG_STEPS
     ShadingInfo s;
     ray_trace(ray, s);
     vec3 radiance = s.emission;
 #endif
 #ifndef DEBUG_STEPS
-    vec3 radiance = path_trace(ray, seed);
+    vec3 radiance = path_trace(ray, seed, depth);
 #endif
-
+    //non-linear reversed-Z depth buffer
+    depth = camera.far / (camera.far - camera.near) * (1.0 - camera.near / depth);
+    // depth = (depth - camera.near) / (camera.far - camera.near) * 2.0f - 1.0f;
     imageStore(outputImage, pos, vec4(radiance, 1.0));
+    imageStore(depthBuffer, pos, vec4(depth, 0.0, 0.0, 0.0));
 }

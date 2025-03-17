@@ -1,7 +1,7 @@
 #ifndef RENDER_PARAMETERS
 #define RENDER_PARAMETERS
 
-#include "bvh/utils.h"
+#include "utils.h"
 #include "bvh/vec.h"
 #include <cstring> // for std::memcpy
 #include <godot_cpp/variant/packed_byte_array.hpp>
@@ -17,8 +17,10 @@ struct Camera
     float ivp[16];
     BVH::vec4 position;
     unsigned int frame_index;
+    float near = 0.01f;
+    float far = 1000.0f;
 
-    void set_camera_transform(Transform3D &model, Projection &projection)
+    void set_camera_transform(const Transform3D &model, const Projection &projection)
     {
         // Vector3 cameraPosition = transform.origin;
         // auto cameraForward = transform.basis.get_column(2);
@@ -31,8 +33,8 @@ struct Camera
         // this->cameraUp = Vector4(cameraUp.x, cameraUp.y, cameraUp.z, 0.0f);
         position = BVH::vec4(model.origin.x, model.origin.y, model.origin.z, 1.0f);
         Projection t = projection * model.affine_inverse();
-        BVH::projection_to_float(vp, t);
-        BVH::projection_to_float(ivp, t.inverse());
+        Utils::projection_to_float(vp, t);
+        Utils::projection_to_float(ivp, t.inverse());
     }
 
     PackedByteArray to_packed_byte_array()

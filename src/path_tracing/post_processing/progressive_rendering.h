@@ -30,7 +30,7 @@ class ProgressiveRendering
     ProgressiveRendering();
     ~ProgressiveRendering();
 
-    void init(RenderingDevice *rd, const RID original_screen_texture_rid, const Ref<RDTextureView> screen_texture_view, const Vector2i size);
+    void init(RenderingDevice *rd, const RID original_screen_texture_rid, const Vector2i size);
 
     void render(Transform3D camera_transform);
 
@@ -49,4 +49,4 @@ class ProgressiveRendering
     RID frame_buffer_rid;
 };
 
-#endif // PATH_TRACING_CAMERA_H
+#endif // PROGRESSIVE_RENDERING_H

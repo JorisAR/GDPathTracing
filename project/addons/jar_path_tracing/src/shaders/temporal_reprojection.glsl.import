@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://bkqicx2buecx0"
+path="res://.godot/imported/temporal_reprojection.glsl-7088bc53308d91dbdd9ee54871a0cf7d.res"
+
+[deps]
+
+source_file="res://addons/jar_path_tracing/src/shaders/temporal_reprojection.glsl"
+dest_files=["res://.godot/imported/temporal_reprojection.glsl-7088bc53308d91dbdd9ee54871a0cf7d.res"]
+
+[params]
+
