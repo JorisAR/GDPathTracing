@@ -2,3 +2,6 @@
 	path = godot-cpp
 	url = https://github.com/godotengine/godot-cpp
 	branch = 4.3
+[submodule "src/gdcs"]
+	path = src/gdcs
+	url = git@github.com:JorisAR/gdcs.git
