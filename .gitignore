@@ -52,4 +52,4 @@ __pycache__/
 Thumbs.db
 desktop.ini
 vc140.pdb
-*.obj
+src/**/*.obj
