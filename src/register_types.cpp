@@ -1,6 +1,7 @@
 #include "register_types.h"
 #include "path_tracing/path_tracing_camera.h"
 #include "path_tracing/geometry_group3d.h"
+#include "path_tracing/path_tracing_effect.h"
 
 using namespace godot;
 
@@ -8,9 +9,9 @@ void initialize_jar_path_tracing_module(ModuleInitializationLevel p_level)
 {
     if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE)
     {
-        GDREGISTER_CLASS(PathTracingCamera)
         GDREGISTER_CLASS(GeometryGroup3D)
-
+        GDREGISTER_CLASS(PathTracingEffect)
+        GDREGISTER_CLASS(PathTracingCamera)
     }
 }
 

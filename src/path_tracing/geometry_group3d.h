@@ -1,27 +1,23 @@
 #ifndef GEOMETRY_GROUP3D_H
 #define GEOMETRY_GROUP3D_H
 
-#include <godot_cpp/classes/array_mesh.hpp>
-#include <godot_cpp/classes/engine.hpp>
-#include <godot_cpp/classes/mesh_instance3d.hpp>
-#include <godot_cpp/classes/material.hpp>
-#include <godot_cpp/classes/texture2d.hpp>
-#include <godot_cpp/classes/standard_material3d.hpp>
-#include <godot_cpp/classes/node3d.hpp>
-#include <godot_cpp/classes/surface_tool.hpp>
-#include <godot_cpp/classes/image.hpp>
-#include <godot_cpp/classes/texture2d_array.hpp>
-#include <godot_cpp/core/class_db.hpp>
-#include <godot_cpp/variant/utility_functions.hpp>
-#include <vector>
-#include <queue>
-
-#include "render_parameters.h"
 #include "bvh/bvh.h"
+#include "path_tracing/gpu_types.h"
+#include "path_tracing/scene_data.h"
+
+#include <godot_cpp/classes/base_material3d.hpp>
+#include <godot_cpp/classes/mesh.hpp>
+#include <godot_cpp/classes/node3d.hpp>
+#include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/core/object_id.hpp>
+
+#include <vector>
 
 using namespace godot;
-using namespace BVH;
 
+// Collects every MeshInstance3D and light below this node and converts them into the data the
+// path tracer needs. Geometry (BLAS, materials, textures) is built once in build(); instance
+// transforms, visibility and lights are tracked every frame so objects can move.
 class GeometryGroup3D : public Node3D
 {
     GDCLASS(GeometryGroup3D, Node3D);
@@ -30,68 +26,83 @@ class GeometryGroup3D : public Node3D
     static void _bind_methods();
     void _notification(int p_what);
 
-  private:
-    struct NodeReference // temporary struct to help build the BLASinstances
-    {
-        MeshInstance3D *node;
-        int mesh_id;
-        // int material_id; // ensure that an invalid material (null or not standard) points to id 0
-        std::vector<int> material_ids; // ensure that an invalid material (null or not standard) points to id 0
-    };
-
-    Ref<StandardMaterial3D> default_material;
-
-    //references use to collect data such that we send as little duplicate data as possible:
-    std::vector<Ref<Mesh>> initial_geometry_references;
-    std::vector<Ref<ArrayMesh>> final_geometry_references;
-    std::vector<NodeReference> node_references;
-
-    std::vector<Ref<Material>> initial_material_references; // first collect all materials
-    std::vector<Ref<StandardMaterial3D>> material_references; // first collect all materials
-    std::vector<GpuMaterial> materials;               // always include a default material at index 0
-
-    std::vector<Ref<Texture2D>> texture_references;
-
-    //Actual buffers to send to the GPU
-    std::vector<BVHNode> bvh_nodes;
-    std::vector<TLASNode> tlas_nodes;
-    std::vector<Triangle> triangles;
-    std::vector<GpuTriangleGeometry> triangles_geometry;
-    std::vector<GpuTriangleData> triangles_data;
-    std::vector<BLASInstance> blas_instances;
-    std::vector<Ref<Image>> textures;
-
-    int texture_array_resolution = 1024; // New property
-
-    unsigned int get_material_index(const Ref<Material> &material);
-    int get_texture_index(const Ref<Texture2D> &texture);
-
-    void collect_mesh_instances();
-    
-
   public:
-    void build();
     GeometryGroup3D();
 
-    int get_blas_count();
-    int get_material_count();
-    int get_triangle_count();
-    int get_bvh_node_count();
-    int get_tlas_node_count();
+    // Rebuilds everything. Call after adding/removing meshes or changing materials at runtime.
+    void build();
+    // Re-reads transforms, visibility and lights; cheap when nothing moved.
+    void update_dynamic(bool force = false);
 
-    PackedByteArray get_triangles_geometry_buffer();
-    PackedByteArray get_triangles_data_buffer();
-    PackedByteArray get_materials_buffer();
-    PackedByteArray get_bvh_buffer();
-    PackedByteArray get_blas_buffer();
-    PackedByteArray get_tlas_buffer();
-    std::vector<Ref<Image>> get_textures_buffer();
+    PT::SceneDataPtr get_scene_data() const
+    {
+        return scene_data;
+    }
 
-    Ref<StandardMaterial3D> get_default_material() const;
-    void set_default_material(Ref<StandardMaterial3D> value);
+    Ref<BaseMaterial3D> get_default_material() const;
+    void set_default_material(const Ref<BaseMaterial3D> &value);
 
-    int get_texture_array_resolution() const;
-    void set_texture_array_resolution(int value);
+    int get_texture_resolution() const;
+    void set_texture_resolution(int value);
+
+    bool get_track_transforms() const;
+    void set_track_transforms(bool value);
+
+    int get_triangle_count() const;
+    int get_instance_count() const;
+    int get_emissive_triangle_count() const;
+
+  private:
+    struct MeshEntry
+    {
+        Ref<Mesh> mesh;
+        uint32_t bvh_root = 0;
+        uint32_t triangle_offset = 0;
+        uint32_t triangle_count = 0;
+        uint32_t surface_count = 0;
+        AABB local_bounds;
+        std::vector<PT::GpuBVHNode> nodes;      // mesh-local indices, root at 0
+        std::vector<PT::BuildTriangle> tris;    // in BVH order
+        std::vector<PT::GpuTriangleData> data;  // in BVH order
+        std::vector<uint32_t> surfaces;         // per triangle, in BVH order
+    };
+
+    struct InstanceEntry
+    {
+        ObjectID node;
+        uint32_t mesh = 0;
+        uint32_t material_offset = 0;
+        bool emissive = false;
+        bool visible = false;
+        Transform3D transform;
+    };
+
+    void collect(std::vector<Node *> &mesh_nodes, std::vector<Node *> &light_nodes);
+    uint32_t get_material_index(const Ref<Material> &material);
+    int get_texture_index(const Ref<Texture2D> &texture);
+    int add_mesh(const Ref<Mesh> &mesh);
+    PackedByteArray build_light_buffer(uint32_t &count);
+
+    PT::SceneDataPtr scene_data;
+
+    Ref<BaseMaterial3D> default_material;
+    int texture_resolution = 512;
+    bool track_transforms = true;
+
+    std::vector<MeshEntry> meshes;
+    std::vector<InstanceEntry> instance_entries;
+    std::vector<ObjectID> light_nodes;
+
+    std::vector<Ref<Material>> material_refs;
+    std::vector<PT::GpuMaterial> materials;
+    std::vector<uint32_t> instance_materials;
+    std::vector<Ref<Texture2D>> texture_refs;
+
+    uint32_t total_triangles = 0;
+    uint32_t visible_instances = 0;
+    uint32_t emissive_triangle_count = 0;
+    PackedByteArray last_light_bytes;
+    bool built = false;
 };
 
 #endif // GEOMETRY_GROUP3D_H

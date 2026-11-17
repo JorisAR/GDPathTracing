@@ -1,436 +1,319 @@
 #[compute]
 #version 460
 
-// #define DEBUG_STEPS
+// Software path tracer, executed as a CompositorEffect on Godot's main RenderingDevice.
+// Writes linear HDR radiance into the scene color buffer; Godot's own tonemapper,
+// exposure and glow run afterwards.
 
-// ----------------------------------- STRUCTS -----------------------------------
+#include "common.glsli"
+#include "brdfs.glsli"
+#include "trace_sw.glsli"
 
-struct Light {
-    vec4 position;
-    vec4 color;
-};
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
+// ----------------------------------- SCENE QUERIES -----------------------------------
 
-struct TriangleGeometry {
-    vec4 vertices[3];
-};
-
-struct TriangleData {
-    vec3 n0;
-    uint materialIndex;
-    vec4 n1;
-    vec4 n2;
-    vec2 uvs[3];
-};
-
-struct Ray {
-    vec3 d;
-    vec3 o;
-    vec3 rD;
-};
-
-struct Material
-{
-    vec4 diffuse_albedo;
-    vec4 emission; //rgb: color, w: multiplier.
-    float metallic;
-    float roughness;
-    int albedo_texture_id;
-    float padding[5];
-    // float ior;
-    // float transmission;
-    
-};
-
-struct BVHNode {
-    vec4 aabbMin;
-    vec4 aabbMax;
-    uint left_child;
-    uint right_child;
-    uint first_tri_index;
-    uint tri_count;
-};
-
-struct TLASNode
-{//interleaved to ensure vec3 16 byte alignment
-    vec3 aabbMin;
-    uint leftRight; // 2x16 bits //if 0, it is a leaf node
-    vec3 aabbMax;
-    uint blas;
-};
-
-struct HitInfo {
-    vec3 position;
-    float t;
-    uint blas;
-    uint triangle;
-    uint steps;
-    vec2 barycentrics;
-    bool front;
-    vec3 out_dir; //i suppose this is essentially fragment-camera direction, though only literally for the direct shading point.
-};
-
-struct ShadingInfo {
-    vec3 position;
-    vec3 normal;
-    vec3 out_dir;
-    float lambert_out;
-    vec3 emission;
-    vec3 diffuse_albedo;
-    vec3 fresnel_0;
-    float roughness;
-};
-
-struct BLASInstance
-{
-    mat4 transform;
-    mat4 inverse_transform;
-    vec4 aabbMin;
-    vec4 aabbMax;
-    uint root; //index to the right BLAS BVH node
-    uint materials[3];
-    //have an array of material ids? say up to 4/8/16 or something
-};
-
-
-// ----------------------------------- GENERAL STORAGE -----------------------------------
-
-layout(set = 0, binding = 0, rgba8) restrict uniform writeonly image2D outputImage;
-layout(set = 0, binding = 1, r32f) restrict uniform writeonly image2D depthBuffer;
-
-layout(std430, set = 0, binding = 2) restrict buffer Params {
-    vec4 background; //rgb, brightness
-    int width;
-    int height;
-    float fov;
-    uint triangleCount;
-    uint blas_count;
-} params;
-
-layout(std430, set = 0, binding = 3) restrict buffer Camera {
-    mat4 vp;
-    mat4 ivp;
-    vec4 position;
-    uint frame_index;
-    float near;
-    float far;
-} camera;
-
-
-// ----------------------------------- STORAGE BUFFERS -----------------------------------
-
-
-layout(set = 1, binding = 0, std430) restrict buffer TrianglesGeometry
-{
-    TriangleGeometry triangles_geometry[];
-};
-
-layout(set = 1, binding = 1, std430) restrict buffer TrianglesData
-{
-    TriangleData triangles_data[];
-};
-
-layout(set = 1, binding = 2, std430) restrict buffer Materials
-{
-    Material materials[];
-};
-
-layout(set = 1, binding = 3, std430) restrict buffer BVHTree
-{
-    BVHNode bvhTree[];
-};
-
-layout(set = 1, binding = 4, std430) restrict buffer BLASInstances
-{
-    BLASInstance blas_instances[];
-};
-
-layout(set = 1, binding = 5, std430) restrict buffer TLASInstances
-{
-    TLASNode tlas_nodes[];
-};
-
-// ----------------------------------- TEXTURES -----------------------------------
-
-layout(set = 2, binding = 0) uniform sampler2DArray textureArray;
-
-// ----------------------------------- FUNCTIONS -----------------------------------
-
-//brdfs
-#include "brdfs.glsl"
-
-
-vec2 pcg2d(inout uvec2 seed) {
-	// PCG2D, as described here: https://jcgt.org/published/0009/03/02/
-	seed = 1664525u * seed + 1013904223u;
-	seed.x += 1664525u * seed.y;
-	seed.y += 1664525u * seed.x;
-	seed ^= (seed >> 16u);
-	seed.x += 1664525u * seed.y;
-	seed.y += 1664525u * seed.x;
-	seed ^= (seed >> 16u);
-	// Multiply by 2^-32 to get floats
-	return vec2(seed) * 2.32830643654e-10; 
+vec3 sample_sky(vec3 d) {
+    if (d.y >= 0.0) {
+        return mix(frame.sky_horizon.rgb, frame.sky_top.rgb, sqrt(d.y));
+    }
+    return mix(frame.sky_horizon.rgb, frame.ground.rgb, sqrt(min(1.0, -d.y * 4.0)));
 }
 
-uvec2 prng_seed(vec2 pos, uint frame) {
-    uvec2 seed = uvec2(pos.xy);
-    seed = seed * 0x9e3779b9u + uvec2(frame);
-    seed ^= seed >> 16u;
-    return seed * 0x9e3779b9u;
+float triangle_world_area(const Instance inst, const Triangle tri) {
+    vec3 e1 = xform_vector(inst.o2w, tri.e1.xyz);
+    vec3 e2 = xform_vector(inst.o2w, tri.e2.xyz);
+    return 0.5 * length(cross(e1, e2));
 }
 
-vec2 box_muller(vec2 rands) {
-    float R = sqrt(-2.0f * log(rands.x));
-    float theta = 6.2831853f * rands.y;
-    return vec2(cos(theta), sin(theta));
-}
-
-vec3 sampleSky(const vec3 direction) {
-    float t = 0.5 * (direction.y + 1.0);
-    return mix(vec3(0.95), vec3(0.9, 0.94, 1.0), t) * 1.0f;
-}
-
-ShadingInfo get_shading_data(const HitInfo h) {
+ShadingInfo get_shading(const Ray ray, const Hit h) {
     ShadingInfo s;
-    TriangleData tri = triangles_data[h.triangle];
-    BLASInstance b = blas_instances[h.blas];
-    Material material = materials[b.materials[tri.materialIndex]];
+    Instance inst = instances[h.instance];
+    Triangle tri = triangles[h.triangle];
+    TriangleData td = triangle_data[h.triangle];
+    Material m = materials[instance_materials[inst.material_offset + td.surface]];
 
-    s.position = (b.transform * vec4(h.position, 1.0)).xyz;//transform position to global space
-    s.out_dir = normalize((b.transform * vec4(h.out_dir, 0.0)).xyz);
-    float u = h.barycentrics.x;
-    float v = h.barycentrics.y;
+    float u = h.bary.x;
+    float v = h.bary.y;
+    float w = 1.0 - u - v;
 
-    vec2 uv = tri.uvs[0] * (1.0 - u - v) + tri.uvs[1] * u + tri.uvs[2] * v;
-    s.normal = tri.n0 * (1.0 - u - v) + tri.n1.xyz * u + tri.n2.xyz * v;//transform normal to global space
-    s.normal = normalize((b.transform * vec4(s.normal, 0.0)).xyz);
-    s.normal = h.front ? s.normal : -s.normal;
+    s.position = ray.o + ray.d * h.t;
+    s.out_dir = -ray.d;
 
-    s.lambert_out = dot(s.normal, s.out_dir);
-    s.emission = material.emission.xyz * max(0, material.emission.w);
-    vec3 albedo = material.diffuse_albedo.rgb;
-    if(material.albedo_texture_id >= 0)
-        albedo *= texture(textureArray, vec3(uv, material.albedo_texture_id)).rgb;
+    vec3 ng = normalize(xform_normal(inst.w2o, cross(tri.e1.xyz, tri.e2.xyz)));
+    vec3 ns = normalize(xform_normal(inst.w2o, td.n0 * w + td.n1.xyz * u + td.n2.xyz * v));
+    if (any(isnan(ns)) || dot(ns, ns) < 0.5) ns = ng;
+    if (dot(ng, s.out_dir) < 0.0) { // back face: flip both normals towards the viewer
+        ng = -ng;
+        ns = -ns;
+    }
+    // Shading normals can point away from the viewer near silhouettes; fall back to the geometric one.
+    if (dot(ns, s.out_dir) < 1e-3) ns = ng;
+    s.geo_normal = ng;
+    s.normal = ns;
+    s.lambert_out = max(dot(ns, s.out_dir), 1e-4);
 
-    float metalicity = material.metallic;
-    s.fresnel_0 = mix(vec3(0.02), albedo, metalicity);
-    s.diffuse_albedo = albedo - metalicity * albedo;
-    s.roughness = max(0.006, material.roughness);   
-   
+    vec2 uv = (td.uv0 * w + td.uv1 * u + td.uv2 * v) * m.uv_scale_offset.xy + m.uv_scale_offset.zw;
+    vec3 albedo = m.albedo.rgb;
+    if (m.albedo_texture >= 0) {
+        albedo *= textureLod(albedo_textures, vec3(uv, float(m.albedo_texture)), 0.0).rgb;
+    }
+
+    s.emission = m.emission.rgb;
+    s.emission_luminance = m.emission.a;
+    s.fresnel_0 = mix(vec3(0.04), albedo, m.metallic);
+    s.diffuse_albedo = albedo * (1.0 - m.metallic);
+    float alpha = m.roughness * m.roughness;
+    s.roughness = max(alpha, 0.01);
+    s.area = triangle_world_area(inst, tri);
     return s;
 }
 
-bool intersectTriangle(const Ray ray, const uint tri_index, in out HitInfo hitInfo) {
-    hitInfo.steps++;
-    TriangleGeometry tri = triangles_geometry[tri_index];
-    vec3 v0 = tri.vertices[0].xyz;
-    vec3 v1 = tri.vertices[1].xyz;
-    vec3 v2 = tri.vertices[2].xyz;
-
-    vec3 edge1 = v1 - v0;
-    vec3 edge2 = v2 - v0;
-
-    vec3 pvec = cross(ray.d, edge2);
-    float det = dot(edge1, pvec);
-
-    if (abs(det) < 1e-5) return false;
-    float invDet = 1.0 / det;
-    vec3 tvec = ray.o - v0;
-    float u = dot(tvec, pvec) * invDet;
-    if (u < 0.0 || u > 1.0) return false;
-    vec3 qvec = cross(tvec, edge1);
-    float v = dot(ray.d, qvec) * invDet;
-    if (v < 0.0 || u + v > 1.0) return false;
-
-    float t = dot(edge2, qvec) * invDet;
-    if(t < 0.0 || t > hitInfo.t) return false;
-
-    hitInfo.position = ray.o + t * ray.d;
-    hitInfo.t = t;
-    hitInfo.triangle = tri_index;
-    hitInfo.barycentrics = vec2(u, v);
-    hitInfo.out_dir = -ray.d;
-    vec3 geometricNormal = cross(edge1, edge2);
-    hitInfo.front = (dot(geometricNormal, ray.d) > 0.0);
-    return true;
+vec3 offset_origin(const ShadingInfo s, vec3 dir) {
+    // Push the origin off the surface on the side the new ray leaves through.
+    float scale = 1e-4 * max(1.0, max(max(abs(s.position.x), abs(s.position.y)), abs(s.position.z)));
+    return s.position + s.geo_normal * (dot(dir, s.geo_normal) >= 0.0 ? scale : -scale);
 }
 
-float intersectAABB(const in Ray ray, const vec3 bmin, const vec3 bmax )
-{
-    float tx1 = (bmin.x - ray.o.x) * ray.rD.x, tx2 = (bmax.x - ray.o.x) * ray.rD.x;
-    float tmin = min( tx1, tx2 ), tmax = max( tx1, tx2 );
-    float ty1 = (bmin.y - ray.o.y) * ray.rD.y, ty2 = (bmax.y - ray.o.y) * ray.rD.y;
-    tmin = max( tmin, min( ty1, ty2 ) ), tmax = min( tmax, max( ty1, ty2 ) );
-    float tz1 = (bmin.z - ray.o.z) * ray.rD.z, tz2 = (bmax.z - ray.o.z) * ray.rD.z;
-    tmin = max( tmin, min( tz1, tz2 ) ), tmax = min( tmax, max( tz1, tz2 ) );
-    if (tmax >= tmin && tmax > 0) return tmin; else return 1e30f;//&& tmin < ray.t
+float power_heuristic(float a, float b) {
+    float a2 = a * a;
+    float b2 = b * b;
+    return a2 / max(a2 + b2, 1e-20);
 }
 
-bool ray_trace_blas(const uint root, const Ray ray, in out HitInfo hitInfo)
-{
-    uint stack[64];
-    uint stackPtr = 0;
-    stack[stackPtr++] = root;
+// Probability (solid angle) that next event estimation picks the point `s` as seen from `from`.
+float emissive_light_pdf(const ShadingInfo s, vec3 from) {
+    if (frame.emissive_count == 0u || frame.emissive_total_power <= 0.0) return 0.0;
+    vec3 to_light = s.position - from;
+    float dist2 = dot(to_light, to_light);
+    float cos_l = abs(dot(s.geo_normal, normalize(to_light)));
+    if (cos_l < 1e-6) return 0.0;
+    float pmf = s.emission_luminance * s.area / frame.emissive_total_power;
+    return pmf * dist2 / (cos_l * s.area);
+}
 
-    while (stackPtr > 0) {
-        BVHNode node = bvhTree[stack[--stackPtr]];
-        // hitInfo.steps++;
+uint pick_emissive_triangle(float u) {
+    // Binary search on the inclusive CDF.
+    uint lo = 0u;
+    uint hi = frame.emissive_count - 1u;
+    while (lo < hi) {
+        uint mid = (lo + hi) >> 1u;
+        if (emissive_triangles[mid].cdf < u) lo = mid + 1u;
+        else hi = mid;
+    }
+    return lo;
+}
 
-        if (node.tri_count > 0) { //isleaf
-            for (uint i = 0; i < node.tri_count; i++) {
-                intersectTriangle(ray, node.first_tri_index + i, hitInfo);
-            }
-            continue;
+// ----------------------------------- DIRECT LIGHTING -----------------------------------
+
+vec3 sample_emissive(const ShadingInfo s, inout uint rng) {
+    EmissiveTriangle light = emissive_triangles[pick_emissive_triangle(rand(rng))];
+    Instance inst = instances[light.instance];
+    Triangle tri = triangles[light.triangle];
+    TriangleData td = triangle_data[light.triangle];
+    Material m = materials[instance_materials[inst.material_offset + td.surface]];
+
+    vec2 r = rand2(rng);
+    if (r.x + r.y > 1.0) r = 1.0 - r;
+    vec3 p_obj = tri.v0.xyz + tri.e1.xyz * r.x + tri.e2.xyz * r.y;
+    vec3 p = xform_point(inst.o2w, p_obj);
+    vec3 e1 = xform_vector(inst.o2w, tri.e1.xyz);
+    vec3 e2 = xform_vector(inst.o2w, tri.e2.xyz);
+    vec3 n_cross = cross(e1, e2);
+    float area = 0.5 * length(n_cross);
+    vec3 nl = n_cross / (2.0 * area);
+
+    vec3 origin = offset_origin(s, p - s.position);
+    vec3 to_light = p - origin;
+    float dist2 = dot(to_light, to_light);
+    float dist = sqrt(dist2);
+    vec3 wi = to_light / dist;
+
+    float cos_s = dot(s.normal, wi);
+    float cos_l = abs(dot(nl, wi)); // emitters are two-sided
+    if (cos_s <= 0.0 || cos_l < 1e-6 || dot(s.geo_normal, wi) <= 0.0) return vec3(0.0);
+
+    float pmf = light.power / frame.emissive_total_power;
+    float pdf_light = pmf * dist2 / (cos_l * area);
+    if (!(pdf_light > 0.0)) return vec3(0.0);
+
+    Ray shadow;
+    shadow.o = origin;
+    shadow.d = wi;
+    if (trace_any(shadow, dist * (1.0 - 1e-4))) return vec3(0.0);
+
+    vec3 f = brdf(s, wi) * cos_s;
+    float pdf_bsdf = get_brdf_density(s, wi);
+    float weight = power_heuristic(pdf_light, pdf_bsdf);
+    return f * m.emission.rgb * weight / pdf_light;
+}
+
+float godot_omni_attenuation(float dist, float range, float decay) {
+    float nd = dist / max(range, 1e-4);
+    nd *= nd;
+    nd *= nd;
+    nd = max(1.0 - nd, 0.0);
+    nd *= nd;
+    return nd * pow(max(dist, 1e-4), -decay);
+}
+
+vec3 sample_punctual(const ShadingInfo s, const PunctualLight light, inout uint rng) {
+    vec3 wi;
+    float dist;
+    vec3 radiance;
+    if (light.type == LIGHT_DIRECTIONAL) {
+        vec3 l = -light.direction;
+        if (light.radius > 0.0) { // soft shadows: sample a cone around the sun direction
+            mat3 b = basis_from_normal(l);
+            vec2 disk = sample_disk(rand2(rng)) * light.radius;
+            l = normalize(b * vec3(disk, 1.0));
         }
-        BVHNode childL = bvhTree[node.left_child];
-        BVHNode childR = bvhTree[node.right_child];
-        float d1 = intersectAABB(ray, childL.aabbMin.xyz, childL.aabbMax.xyz);
-        float d2 = intersectAABB(ray, childR.aabbMin.xyz, childR.aabbMax.xyz);
-        bool leftValid = d1 < hitInfo.t;
-        bool rightValid = d2 < hitInfo.t;
-
-        if (d1 < d2) {
-            if (rightValid) stack[stackPtr++] = node.right_child;
-            if (leftValid) stack[stackPtr++] = node.left_child;
-        } else {
-            if (leftValid) stack[stackPtr++] = node.left_child;
-            if (rightValid) stack[stackPtr++] = node.right_child;
-        }   
-    }
-
-    return hitInfo.t < 1e9;
-}
-
-bool ray_trace_tlas(const Ray ray, inout HitInfo hitInfo)
-{
-    uint stack[64];
-    int stackPtr = 0;
-    stack[stackPtr++] = 0;
-    float minT = 1e9; //todo remove?
-
-    while (stackPtr > 0) {
-        TLASNode node = tlas_nodes[stack[--stackPtr]];
-        // hitInfo.steps++;
-
-        if(node.leftRight == 0){
-            BLASInstance b = blas_instances[node.blas];
-            Ray b_ray; 
-            b_ray.o = (b.inverse_transform * vec4(ray.o, 1.0)).xyz;
-            b_ray.d = (b.inverse_transform * vec4(ray.d, 0.0)).xyz;
-            b_ray.rD = 1.0 / b_ray.d;
-            ray_trace_blas(b.root, b_ray, hitInfo);
-
-            if (hitInfo.t < minT) {
-                hitInfo.blas = node.blas;                
-                minT = hitInfo.t;
-            }
-            continue;
-        } 
-        // Internal node: Traverse children
-        uint left = node.leftRight & 0xFFFF;
-        uint right = node.leftRight >> 16;
-        TLASNode childL = tlas_nodes[left];
-        TLASNode childR = tlas_nodes[right];
-        float d1 = intersectAABB(ray, childL.aabbMin.xyz, childL.aabbMax.xyz);
-        float d2 = intersectAABB(ray, childR.aabbMin.xyz, childR.aabbMax.xyz);
-        bool leftValid = d1 < hitInfo.t;
-        bool rightValid = d2 < hitInfo.t;
-
-        if (d1 < d2) {
-            if (rightValid) stack[stackPtr++] = right;
-            if (leftValid) stack[stackPtr++] = left;
-        } else {
-            if (leftValid) stack[stackPtr++] = left;
-            if (rightValid) stack[stackPtr++] = right;
-        }      
-    }
-
-    return hitInfo.t < 1e9;
-}
-//traces scene, and returns shading data. true if scene hit, false if missed (i.e. hit the sky instead)
-bool ray_trace(const Ray ray, out ShadingInfo s) {
-    HitInfo hitInfo;
-    hitInfo.t = 1e9;    
-    hitInfo.steps = 0;
-    bool hit = ray_trace_tlas(ray, hitInfo);
-
-#ifdef DEBUG_STEPS    
-    s.emission = vec3(clamp(hitInfo.steps / 256.0f, 0, 1));
-    return false;
-#endif
-    if(hit)
-    {
-        s = get_shading_data(hitInfo);
-        return true;
+        wi = l;
+        dist = INF;
+        radiance = light.color;
     } else {
-        s.emission = sampleSky(ray.d);        
-        return false;
+        vec3 target = light.position;
+        if (light.radius > 0.0) target += sample_sphere(rand2(rng)) * light.radius;
+        vec3 to_light = target - s.position;
+        dist = length(to_light);
+        if (dist < 1e-5 || dist > light.range) return vec3(0.0);
+        wi = to_light / dist;
+        radiance = light.color * godot_omni_attenuation(dist, light.range, light.attenuation);
+        if (light.type == LIGHT_SPOT) {
+            float c = dot(-wi, light.direction);
+            radiance *= smoothstep(light.spot_cos_outer, light.spot_cos_inner, c);
+        }
     }
+    float cos_s = dot(s.normal, wi);
+    if (cos_s <= 0.0 || dot(s.geo_normal, wi) <= 0.0 || luminance(radiance) <= 0.0) return vec3(0.0);
+
+    Ray shadow;
+    shadow.o = offset_origin(s, wi);
+    shadow.d = wi;
+    if (trace_any(shadow, dist == INF ? INF : dist * (1.0 - 1e-4))) return vec3(0.0);
+    return brdf(s, wi) * cos_s * radiance;
 }
 
-vec3 path_trace(Ray ray, inout uvec2 seed, out float depth) {
-    depth = camera.far;
+// ----------------------------------- INTEGRATOR -----------------------------------
+
+vec3 clamp_contribution(vec3 c, uint depth) {
+    if (depth == 0u || frame.firefly_clamp <= 0.0) return c;
+    float l = luminance(c);
+    return l > frame.firefly_clamp ? c * (frame.firefly_clamp / l) : c;
+}
+
+vec3 path_trace(Ray ray, inout uint rng) {
     vec3 radiance = vec3(0.0);
-    vec3 throughput = vec3(1.0f);
-    // [[unroll]]
-    for (int i = 0; i < 5; i++) {
-        ShadingInfo s;
-        bool hit = ray_trace(ray, s);
-        radiance += throughput * s.emission;
-        if(hit) {
-            if(i == 0)
-                depth = length(s.position - ray.o);
+    vec3 throughput = vec3(1.0);
+    float prev_bsdf_pdf = 0.0;
+    vec3 prev_position = ray.o;
 
-			ray.o = s.position + s.normal * 0.001;
-			ray.d = sample_brdf(s, pcg2d(seed));
-            ray.rD = 1.0 / ray.d;
-
-			float density = get_brdf_density(s, ray.d);
-			float lambert_in = dot(s.normal, ray.d);
-			if (lambert_in <= 0.0)
-				break;
-
-			throughput *= brdf(s, ray.d) * lambert_in / density;
-        } else {
+    for (uint depth = 0u; depth <= frame.max_bounces; depth++) {
+        Hit hit;
+        if (!trace_closest(ray, INF, hit)) {
+            radiance += clamp_contribution(throughput * sample_sky(ray.d), depth);
             break;
         }
-    }
+        ShadingInfo s = get_shading(ray, hit);
 
+        // Emission found by BSDF sampling, MIS-weighted against next event estimation.
+        if (s.emission_luminance > 0.0) {
+            float weight = 1.0;
+            if (depth > 0u) {
+                float pdf_light = emissive_light_pdf(s, prev_position);
+                weight = power_heuristic(prev_bsdf_pdf, pdf_light);
+            }
+            radiance += clamp_contribution(throughput * s.emission * weight, depth);
+        }
+
+        if (depth == frame.max_bounces) break;
+
+        // Next event estimation.
+        vec3 direct = vec3(0.0);
+        if (frame.emissive_count > 0u) {
+            direct += sample_emissive(s, rng);
+        }
+        for (uint i = 0u; i < frame.punctual_count; i++) {
+            direct += sample_punctual(s, punctual_lights[i], rng);
+        }
+        radiance += clamp_contribution(throughput * direct, depth + 1u);
+
+        // Continue the path.
+        vec3 wi = sample_brdf(s, rand2(rng));
+        float cos_in = dot(s.normal, wi);
+        if (cos_in <= 0.0 || dot(s.geo_normal, wi) <= 0.0) break;
+        float pdf = get_brdf_density(s, wi);
+        if (!(pdf > 1e-8)) break;
+        throughput *= brdf(s, wi) * cos_in / pdf;
+
+        // Russian roulette.
+        if (depth >= 2u) {
+            float p = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
+            if (rand(rng) > p) break;
+            throughput /= p;
+        }
+        if (any(isnan(throughput)) || any(isinf(throughput))) break;
+
+        prev_bsdf_pdf = pdf;
+        prev_position = s.position;
+        ray.o = offset_origin(s, wi);
+        ray.d = wi;
+    }
     return radiance;
 }
 
+vec3 debug_view(Ray ray) {
+    Hit hit;
+    bool found = trace_closest(ray, INF, hit);
+    if (frame.debug_mode == DEBUG_TRAVERSAL) {
+        float x = clamp(float(hit.steps) / 128.0, 0.0, 1.0);
+        return vec3(x, x * x, 1.0 - x) * x;
+    }
+    if (!found) return sample_sky(ray.d);
+    ShadingInfo s = get_shading(ray, hit);
+    if (frame.debug_mode == DEBUG_NORMALS) return s.normal * 0.5 + 0.5;
+    return s.diffuse_albedo + s.fresnel_0 * 0.0;
+}
 
-layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+Ray camera_ray(vec2 pixel) {
+    // Godot's RD projection already accounts for the flipped Vulkan framebuffer y axis.
+    vec2 ndc = pixel / vec2(frame.size) * 2.0 - 1.0;
+    vec4 view = frame.inv_projection * vec4(ndc, 0.5, 1.0);
+    view.xyz /= view.w;
+    Ray r;
+    r.o = frame.cam_to_world[3].xyz;
+    r.d = normalize(mat3(frame.cam_to_world) * normalize(view.xyz));
+    return r;
+}
+
 void main() {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
-    if (pos.x >= params.width || pos.y >= params.height) return;
-    // uvec2 seed = uvec2(gl_GlobalInvocationID.xy) ^ uvec2(camera.frame_index << 16, (camera.frame_index + 2378756348) << 16);
-    uvec2 seed = prng_seed(gl_GlobalInvocationID.xy, camera.frame_index);
+    if (pos.x >= frame.size.x || pos.y >= frame.size.y) return;
 
-    vec2 screenPos = vec2(pos + box_muller(pcg2d(seed) * 0.25)) / vec2(params.width, params.height) * 2.0 - 1.0;
-    vec4 ndcPos = vec4(screenPos.x, -screenPos.y, 1.0, 1.0);
-    vec4 worldPos = camera.ivp * ndcPos;
-    worldPos /= worldPos.w;
+    if ((frame.flags & FLAG_COPY_ONLY) != 0u) {
+        imageStore(color_image, pos, vec4(imageLoad(accum_image, pos).rgb, 1.0));
+        return;
+    }
 
-    // Light light = {vec4(0.0, 4.0, 0.0, 1.0), vec4(1.0, 1.0, 1.0, 1.0);
-    Ray ray;
-    ray.o = camera.position.xyz;
+    uint rng = pcg_hash(uint(pos.x) + pcg_hash(uint(pos.y) + pcg_hash(frame.frame_index)));
 
-    ray.d = normalize(worldPos.xyz - camera.position.xyz);
-    ray.rD = 1.0 / ray.d;
-    float depth = camera.far;
-#ifdef DEBUG_STEPS
-    ShadingInfo s;
-    ray_trace(ray, s);
-    vec3 radiance = s.emission;
-#endif
-#ifndef DEBUG_STEPS
-    vec3 radiance = path_trace(ray, seed, depth);
-#endif
-    //non-linear reversed-Z depth buffer
-    depth = camera.far / (camera.far - camera.near) * (1.0 - camera.near / depth);
-    // depth = (depth - camera.near) / (camera.far - camera.near) * 2.0f - 1.0f;
-    imageStore(outputImage, pos, vec4(radiance, 1.0));
-    imageStore(depthBuffer, pos, vec4(depth, 0.0, 0.0, 0.0));
+    vec3 color = vec3(0.0);
+    uint spp = max(frame.samples_per_pixel, 1u);
+    for (uint i = 0u; i < spp; i++) {
+        vec2 pixel = vec2(pos) + rand2(rng);
+        Ray ray = camera_ray(pixel);
+        vec3 c = frame.debug_mode == DEBUG_NONE ? path_trace(ray, rng) : debug_view(camera_ray(vec2(pos) + 0.5));
+        if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
+        color += c;
+    }
+    color /= float(spp);
+
+    if ((frame.flags & FLAG_ACCUMULATE) != 0u) {
+        if (frame.sample_index > 0u) {
+            vec3 prev = imageLoad(accum_image, pos).rgb;
+            color = prev + (color - prev) / float(frame.sample_index + 1u);
+        }
+        imageStore(accum_image, pos, vec4(color, 1.0));
+    }
+    imageStore(color_image, pos, vec4(color, 1.0));
 }

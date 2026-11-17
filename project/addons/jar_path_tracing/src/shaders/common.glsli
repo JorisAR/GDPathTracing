@@ -1,0 +1,203 @@
+// Shared declarations for the path tracer. Mirrors src/path_tracing/gpu_types.h and
+// src/path_tracing/path_tracing_effect.h (FrameData). Keep both sides in sync.
+
+#define M_PI 3.141592653589793
+#define INF 1e30
+
+#define DEBUG_NONE 0u
+#define DEBUG_NORMALS 1u
+#define DEBUG_ALBEDO 2u
+#define DEBUG_TRAVERSAL 3u
+
+#define FLAG_ACCUMULATE 1u
+#define FLAG_COPY_ONLY 2u
+
+#define TLAS_LEAF 0xFFFFFFFFu
+#define INSTANCE_FLAG_EMISSIVE 1u
+
+#define LIGHT_DIRECTIONAL 0u
+#define LIGHT_OMNI 1u
+#define LIGHT_SPOT 2u
+
+struct BVHNode {
+    vec3 aabb_min;
+    uint left_first;
+    vec3 aabb_max;
+    uint tri_count;
+};
+
+struct TLASNode {
+    vec3 aabb_min;
+    uint left;
+    vec3 aabb_max;
+    uint right;
+};
+
+struct Triangle {
+    vec4 v0;
+    vec4 e1;
+    vec4 e2;
+};
+
+struct TriangleData {
+    vec3 n0;
+    uint surface;
+    vec4 n1;
+    vec4 n2;
+    vec2 uv0;
+    vec2 uv1;
+    vec2 uv2;
+    vec2 pad;
+};
+
+struct Material {
+    vec4 albedo;
+    vec4 emission; // rgb radiance, a = luminance
+    float metallic;
+    float roughness;
+    int albedo_texture;
+    uint flags;
+    vec4 uv_scale_offset;
+};
+
+struct Instance {
+    vec4 o2w[3]; // rows of the object -> world affine matrix
+    vec4 w2o[3]; // rows of the world -> object affine matrix
+    uint bvh_root;
+    uint material_offset;
+    uint triangle_offset;
+    uint flags;
+};
+
+struct EmissiveTriangle {
+    uint instance;
+    uint triangle;
+    float cdf;
+    float power;
+};
+
+struct PunctualLight {
+    vec3 position;
+    uint type;
+    vec3 direction;
+    float radius;
+    vec3 color;
+    float range;
+    float spot_cos_outer;
+    float spot_cos_inner;
+    float attenuation;
+    float pad;
+};
+
+// ----------------------------------- BINDINGS -----------------------------------
+
+layout(set = 0, binding = 0, std140) uniform FrameData {
+    mat4 cam_to_world;
+    mat4 inv_projection;
+    vec4 sky_top;     // rgb * energy
+    vec4 sky_horizon; // rgb * energy
+    vec4 ground;      // rgb * energy
+    ivec2 size;
+    uint frame_index;
+    uint sample_index;
+    uint max_bounces;
+    uint samples_per_pixel;
+    uint instance_count;
+    uint emissive_count;
+    uint punctual_count;
+    float emissive_total_power;
+    float firefly_clamp;
+    uint debug_mode;
+    uint flags;
+    uint pad0;
+    uint pad1;
+    uint pad2;
+} frame;
+
+layout(set = 0, binding = 1, rgba16f) uniform restrict image2D color_image;
+layout(set = 0, binding = 2, rgba32f) uniform restrict image2D accum_image;
+
+layout(set = 1, binding = 0, std430) restrict readonly buffer BVHNodes { BVHNode bvh_nodes[]; };
+layout(set = 1, binding = 1, std430) restrict readonly buffer Triangles { Triangle triangles[]; };
+layout(set = 1, binding = 2, std430) restrict readonly buffer TriangleDatas { TriangleData triangle_data[]; };
+layout(set = 1, binding = 3, std430) restrict readonly buffer Materials { Material materials[]; };
+layout(set = 1, binding = 4, std430) restrict readonly buffer InstanceMaterials { uint instance_materials[]; };
+layout(set = 1, binding = 5, std430) restrict readonly buffer Instances { Instance instances[]; };
+layout(set = 1, binding = 6, std430) restrict readonly buffer TLASNodes { TLASNode tlas_nodes[]; };
+layout(set = 1, binding = 7, std430) restrict readonly buffer EmissiveTriangles { EmissiveTriangle emissive_triangles[]; };
+layout(set = 1, binding = 8, std430) restrict readonly buffer PunctualLights { PunctualLight punctual_lights[]; };
+
+layout(set = 2, binding = 0) uniform sampler2DArray albedo_textures;
+
+// ----------------------------------- HELPERS -----------------------------------
+
+struct Ray {
+    vec3 o;
+    vec3 d;
+};
+
+struct Hit {
+    float t;
+    vec2 bary;
+    uint instance;
+    uint triangle;
+    uint steps;
+};
+
+vec3 xform_point(const vec4 rows[3], vec3 p) {
+    return vec3(dot(rows[0], vec4(p, 1.0)), dot(rows[1], vec4(p, 1.0)), dot(rows[2], vec4(p, 1.0)));
+}
+
+vec3 xform_vector(const vec4 rows[3], vec3 v) {
+    return vec3(dot(rows[0].xyz, v), dot(rows[1].xyz, v), dot(rows[2].xyz, v));
+}
+
+// Transforms an object space normal to world space using the inverse transpose,
+// i.e. transpose(world_to_object) * n. Correct under non-uniform scale.
+vec3 xform_normal(const vec4 w2o[3], vec3 n) {
+    return n.x * w2o[0].xyz + n.y * w2o[1].xyz + n.z * w2o[2].xyz;
+}
+
+float luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// ----------------------------------- RANDOM -----------------------------------
+
+uint pcg_hash(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float rand(inout uint state) {
+    state = state * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    word = (word >> 22u) ^ word;
+    return float(word >> 8u) * (1.0 / 16777216.0);
+}
+
+vec2 rand2(inout uint state) {
+    return vec2(rand(state), rand(state));
+}
+
+// Orthonormal basis around n (Duff et al. 2017).
+mat3 basis_from_normal(vec3 n) {
+    float s = n.z >= 0.0 ? 1.0 : -1.0;
+    float a = -1.0 / (s + n.z);
+    float b = n.x * n.y * a;
+    return mat3(vec3(1.0 + s * n.x * n.x * a, s * b, -s * n.x), vec3(b, s + n.y * n.y * a, -n.y), n);
+}
+
+vec2 sample_disk(vec2 u) {
+    float r = sqrt(u.x);
+    float phi = 2.0 * M_PI * u.y;
+    return r * vec2(cos(phi), sin(phi));
+}
+
+vec3 sample_sphere(vec2 u) {
+    float z = 1.0 - 2.0 * u.x;
+    float r = sqrt(max(0.0, 1.0 - z * z));
+    float phi = 2.0 * M_PI * u.y;
+    return vec3(r * cos(phi), r * sin(phi), z);
+}

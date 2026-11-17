@@ -1,7 +1,7 @@
 [configuration]
 
 entry_symbol = "jar_path_tracing_library_init"
-compatibility_minimum = "4.1"
+compatibility_minimum = "4.7"
 reloadable = true
 
 [libraries]

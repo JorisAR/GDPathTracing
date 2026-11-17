@@ -1,0 +1,151 @@
+// Software ray traversal (two-level BVH). A hardware backend only needs to provide the same
+// two functions: trace_closest() and trace_any().
+
+#define BLAS_STACK_SIZE 32
+#define TLAS_STACK_SIZE 32
+
+// Slab test. Returns the entry distance, or INF on a miss / when the box lies beyond t_max.
+float intersect_aabb(const Ray r, const vec3 inv_d, const vec3 bmin, const vec3 bmax, const float t_max) {
+    vec3 t0 = (bmin - r.o) * inv_d;
+    vec3 t1 = (bmax - r.o) * inv_d;
+    vec3 tmin = min(t0, t1);
+    vec3 tmax = max(t0, t1);
+    float t_enter = max(max(tmin.x, tmin.y), max(tmin.z, 0.0));
+    float t_exit = min(min(tmax.x, tmax.y), min(tmax.z, t_max));
+    return t_enter <= t_exit ? t_enter : INF;
+}
+
+// Moller-Trumbore. Updates hit when closer.
+bool intersect_triangle(const Ray r, const uint tri_index, inout Hit hit) {
+    Triangle tri = triangles[tri_index];
+    vec3 e1 = tri.e1.xyz;
+    vec3 e2 = tri.e2.xyz;
+    vec3 p = cross(r.d, e2);
+    float det = dot(e1, p);
+    if (abs(det) < 1e-12) return false;
+    float inv_det = 1.0 / det;
+    vec3 s = r.o - tri.v0.xyz;
+    float u = dot(s, p) * inv_det;
+    if (u < 0.0 || u > 1.0) return false;
+    vec3 q = cross(s, e1);
+    float v = dot(r.d, q) * inv_det;
+    if (v < 0.0 || u + v > 1.0) return false;
+    float t = dot(e2, q) * inv_det;
+    if (t <= 0.0 || t >= hit.t) return false;
+    hit.t = t;
+    hit.bary = vec2(u, v);
+    hit.triangle = tri_index;
+    return true;
+}
+
+// Traverses one BLAS with an object space ray. Returns true if the hit was updated.
+bool intersect_blas(const Ray r, const uint root, const bool any_hit, inout Hit hit) {
+    vec3 inv_d = 1.0 / r.d;
+    uint stack[BLAS_STACK_SIZE];
+    uint sp = 0u;
+    bool found = false;
+
+    BVHNode node = bvh_nodes[root];
+    if (intersect_aabb(r, inv_d, node.aabb_min, node.aabb_max, hit.t) == INF) return false;
+
+    while (true) {
+        hit.steps++;
+        if (node.tri_count > 0u) {
+            for (uint i = 0u; i < node.tri_count; i++) {
+                if (intersect_triangle(r, node.left_first + i, hit)) {
+                    found = true;
+                    if (any_hit) return true;
+                }
+            }
+            if (sp == 0u) break;
+            node = bvh_nodes[stack[--sp]];
+            continue;
+        }
+
+        uint c1 = node.left_first;
+        uint c2 = c1 + 1u;
+        BVHNode n1 = bvh_nodes[c1];
+        BVHNode n2 = bvh_nodes[c2];
+        float d1 = intersect_aabb(r, inv_d, n1.aabb_min, n1.aabb_max, hit.t);
+        float d2 = intersect_aabb(r, inv_d, n2.aabb_min, n2.aabb_max, hit.t);
+        if (d1 > d2) {
+            float td = d1; d1 = d2; d2 = td;
+            uint tc = c1; c1 = c2; c2 = tc;
+            BVHNode tn = n1; n1 = n2; n2 = tn;
+        }
+        if (d1 == INF) {
+            if (sp == 0u) break;
+            node = bvh_nodes[stack[--sp]];
+        } else {
+            node = n1;
+            if (d2 != INF && sp < BLAS_STACK_SIZE) stack[sp++] = c2;
+        }
+    }
+    return found;
+}
+
+bool trace_tlas(const Ray r, const bool any_hit, inout Hit hit) {
+    if (frame.instance_count == 0u) return false;
+    vec3 inv_d = 1.0 / r.d;
+    uint stack[TLAS_STACK_SIZE];
+    uint sp = 0u;
+    bool found = false;
+
+    TLASNode node = tlas_nodes[0];
+    if (intersect_aabb(r, inv_d, node.aabb_min, node.aabb_max, hit.t) == INF) return false;
+
+    while (true) {
+        if (node.right == TLAS_LEAF) {
+            Instance inst = instances[node.left];
+            Ray local;
+            local.o = xform_point(inst.w2o, r.o);
+            local.d = xform_vector(inst.w2o, r.d); // not normalized: t stays comparable across instances
+            if (intersect_blas(local, inst.bvh_root, any_hit, hit)) {
+                hit.instance = node.left;
+                found = true;
+                if (any_hit) return true;
+            }
+            if (sp == 0u) break;
+            node = tlas_nodes[stack[--sp]];
+            continue;
+        }
+
+        uint c1 = node.left;
+        uint c2 = node.right;
+        TLASNode n1 = tlas_nodes[c1];
+        TLASNode n2 = tlas_nodes[c2];
+        float d1 = intersect_aabb(r, inv_d, n1.aabb_min, n1.aabb_max, hit.t);
+        float d2 = intersect_aabb(r, inv_d, n2.aabb_min, n2.aabb_max, hit.t);
+        if (d1 > d2) {
+            float td = d1; d1 = d2; d2 = td;
+            uint tc = c1; c1 = c2; c2 = tc;
+            TLASNode tn = n1; n1 = n2; n2 = tn;
+        }
+        if (d1 == INF) {
+            if (sp == 0u) break;
+            node = tlas_nodes[stack[--sp]];
+        } else {
+            node = n1;
+            if (d2 != INF && sp < TLAS_STACK_SIZE) stack[sp++] = c2;
+        }
+    }
+    return found;
+}
+
+// Closest hit along r within (0, t_max). r.d must be normalized for hit.t to be a distance.
+bool trace_closest(const Ray r, const float t_max, out Hit hit) {
+    hit.t = t_max;
+    hit.bary = vec2(0.0);
+    hit.instance = 0u;
+    hit.triangle = 0u;
+    hit.steps = 0u;
+    return trace_tlas(r, false, hit);
+}
+
+// Visibility query: true if anything blocks r within (0, t_max).
+bool trace_any(const Ray r, const float t_max) {
+    Hit hit;
+    hit.t = t_max;
+    hit.steps = 0u;
+    return trace_tlas(r, true, hit);
+}

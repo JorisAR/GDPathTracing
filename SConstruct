@@ -5,24 +5,23 @@ import sys
 # compile_db()
 
 
+# Target the Godot 4.7 API by default (godot-cpp 10 ships the 4.7 extension_api.json).
+# Override on the command line with e.g. `scons api_version=4.7`.
+ARGUMENTS.setdefault("api_version", "4.7")
+
 # Import the SConstruct from godot-cpp
 env = SConscript("godot-cpp/SConstruct")
 
 # Add necessary include directories
-env.Append(CPPPATH=[
-    "src/",
-    "src/path_tracing/",
-    "src/path_tracing/post_processing",
-    "src/gdcs/include/",
-])
+env.Append(CPPPATH=["src/"])
 
 # Add main source files
-sources = Glob("src/*.cpp") + Glob("src/path_tracing/*.cpp") + Glob("src/gdcs/src/*.cpp")  + Glob("src/bvh/*.cpp") + Glob("src/path_tracing/post_processing/*.cpp")
+sources = Glob("src/*.cpp") + Glob("src/bvh/*.cpp") + Glob("src/rd/*.cpp") + Glob("src/path_tracing/*.cpp")
 
 #compiler flags
 if env['PLATFORM'] == 'windows':
     if env['CXX'] == 'x86_64-w64-mingw32-g++':
-        env.Append(CXXFLAGS=['-std=c++11'])  # Example flags for MinGW
+        pass
     elif env['CXX'] == 'cl':
         env.Append(CXXFLAGS=['/EHsc'])  # Apply /EHsc for MSVC
 

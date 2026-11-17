@@ -1,4 +1,19 @@
-#define M_PI 3.141592653589793238462643
+// BRDF: Burley-ish diffuse + GGX specular with VNDF sampling.
+// `ShadingInfo.roughness` is the GGX alpha (perceptual roughness squared).
+
+struct ShadingInfo {
+    vec3 position;
+    vec3 geo_normal;   // faces the incoming ray
+    vec3 normal;       // shading normal, same hemisphere as geo_normal
+    vec3 out_dir;      // towards the previous vertex
+    float lambert_out; // dot(normal, out_dir)
+    vec3 emission;
+    float emission_luminance;
+    vec3 diffuse_albedo;
+    vec3 fresnel_0;
+    float roughness;
+    float area;        // world space triangle area (for light pdfs)
+};
 
 vec3 fresnel_schlick(vec3 f0, vec3 f90, float cosine_theta) {
     float factor = 1.0 - cosine_theta;
@@ -81,15 +96,7 @@ float get_ggx_in_dir_density(float n_dot_view, vec3 view_dir, vec3 light_dir, ve
 }
 
 mat3 get_shading_space(vec3 normal) {
-    float sign = normal.z > 0.0 ? 1.0 : -1.0;
-    float a = -1.0 / (sign + normal.z);
-    float b = normal.x * normal.y * a;
-    
-    return mat3(
-        vec3(1.0 + sign * normal.x * normal.x * a, sign * b, -sign * normal.x),
-        vec3(b, sign + normal.y * normal.y * a, -normal.y),
-        normal
-    );
+    return basis_from_normal(normal);
 }
 
 vec3 sample_hemisphere_psa(vec2 random_sample) {
