@@ -75,6 +75,7 @@ class GeometryGroup3D : public Node3D
         bool emissive = false;
         bool visible = false;
         Transform3D transform;
+        Transform3D prev_transform;
     };
 
     void collect(std::vector<Node *> &mesh_nodes, std::vector<Node *> &light_nodes);
@@ -82,6 +83,7 @@ class GeometryGroup3D : public Node3D
     int get_texture_index(const Ref<Texture2D> &texture);
     int add_mesh(const Ref<Mesh> &mesh);
     PackedByteArray build_light_buffer(uint32_t &count);
+    PackedByteArray build_portal_buffer(uint32_t &count);
 
     PT::SceneDataPtr scene_data;
 
@@ -92,6 +94,7 @@ class GeometryGroup3D : public Node3D
     std::vector<MeshEntry> meshes;
     std::vector<InstanceEntry> instance_entries;
     std::vector<ObjectID> light_nodes;
+    std::vector<ObjectID> portal_nodes;
 
     std::vector<Ref<Material>> material_refs;
     std::vector<PT::GpuMaterial> materials;
@@ -102,6 +105,8 @@ class GeometryGroup3D : public Node3D
     uint32_t visible_instances = 0;
     uint32_t emissive_triangle_count = 0;
     PackedByteArray last_light_bytes;
+    PackedByteArray last_portal_bytes;
+    bool moved_last_update = false;
     bool built = false;
 };
 

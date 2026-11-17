@@ -1,5 +1,9 @@
 #include "path_tracing_effect.h"
 
+#include <godot_cpp/classes/rd_acceleration_structure_geometry.hpp>
+#include <godot_cpp/classes/rd_acceleration_structure_instance.hpp>
+#include <godot_cpp/classes/rd_hit_group.hpp>
+#include <godot_cpp/classes/rd_pipeline_shader.hpp>
 #include <godot_cpp/classes/rd_sampler_state.hpp>
 #include <godot_cpp/classes/rd_shader_spirv.hpp>
 #include <godot_cpp/classes/rd_texture_format.hpp>
@@ -16,15 +20,19 @@ using namespace PT;
 namespace
 {
 
-// StringNames must not be constructed before godot-cpp is initialized, so no globals here.
+// StringNames must not be constructed before godot-cpp is initialized, so no globals of that type.
 const char *CONTEXT = "jar_path_tracing";
-const char *ACCUM_NAME = "accumulation";
+const char *HISTORY_NAMES[2] = {"history0", "history1"};
+const char *GBUFFER_NAMES[2] = {"gbuffer0", "gbuffer1"};
 
 enum FrameFlags : uint32_t
 {
-    FLAG_ACCUMULATE = 1u,
+    FLAG_REPROJECT = 1u,
     FLAG_COPY_ONLY = 2u,
+    FLAG_RESET = 4u,
 };
+
+constexpr uint32_t UNLIMITED_HISTORY = 1u << 30;
 
 void write_transform(float *dst, const Transform3D &t)
 {
@@ -70,6 +78,17 @@ bool projection_equal(const Projection &a, const Projection &b)
     return true;
 }
 
+RID ensure_texture(const Ref<RenderSceneBuffersRD> &buffers, const char *name, const Vector2i &size)
+{
+    if (!buffers->has_texture(CONTEXT, name))
+    {
+        buffers->create_texture(CONTEXT, name, RenderingDevice::DATA_FORMAT_R32G32B32A32_SFLOAT,
+                                RenderingDevice::TEXTURE_USAGE_STORAGE_BIT | RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT,
+                                RenderingDevice::TEXTURE_SAMPLES_1, size, 1, 1, true, false);
+    }
+    return buffers->get_texture(CONTEXT, name);
+}
+
 } // namespace
 
 PathTracingEffect::PathTracingEffect()
@@ -81,6 +100,7 @@ void PathTracingEffect::_bind_methods()
 {
     ClassDB::bind_method(D_METHOD("reset_accumulation"), &PathTracingEffect::reset_accumulation);
     ClassDB::bind_method(D_METHOD("get_sample_count"), &PathTracingEffect::get_sample_count);
+    ClassDB::bind_method(D_METHOD("get_active_backend"), &PathTracingEffect::get_active_backend);
 }
 
 void PathTracingEffect::_notification(int p_what)
@@ -89,10 +109,11 @@ void PathTracingEffect::_notification(int p_what)
         free_resources();
 }
 
-void PathTracingEffect::set_shader_file(const Ref<RDShaderFile> &p_shader_file)
+void PathTracingEffect::set_shader_files(const Ref<RDShaderFile> &p_software, const Ref<RDShaderFile> &p_hardware)
 {
     std::lock_guard<std::mutex> lock(mutex);
-    shader_file = p_shader_file;
+    software_file = p_software;
+    hardware_file = p_hardware;
 }
 
 void PathTracingEffect::set_scene(const SceneDataPtr &p_scene)
@@ -117,72 +138,99 @@ int PathTracingEffect::get_sample_count() const
     return sample_count.load();
 }
 
+int PathTracingEffect::get_active_backend() const
+{
+    return active_backend.load();
+}
+
+void PathTracingEffect::free_hardware_structures(RenderingDevice *rd)
+{
+    if (hw_tlas.is_valid())
+        rd->free_rid(hw_tlas);
+    hw_tlas = RID();
+    hw_tlas_capacity = 0;
+    for (RID &b : blases)
+        if (b.is_valid())
+            rd->free_rid(b);
+    for (RID &v : blas_vertex_buffers)
+        if (v.is_valid())
+            rd->free_rid(v);
+    blases.clear();
+    blas_vertex_buffers.clear();
+    blas_vertex_counts.clear();
+    hw_geometry_version = 0;
+    hw_instance_version = 0;
+}
+
 void PathTracingEffect::free_resources()
 {
     if (device == nullptr)
         return;
     RenderingDevice *rd = device;
-    // Freeing the shader also frees the pipeline and cached uniform sets that depend on it.
-    if (shader.is_valid())
-        rd->free_rid(shader);
+    free_hardware_structures(rd);
+    // Freeing a shader also frees its pipeline and the cached uniform sets that depend on it.
+    if (software.shader.is_valid())
+        rd->free_rid(software.shader);
+    if (hardware.sbt.is_valid())
+    {
+        rd->hit_sbt_range_free(hardware.sbt, hardware.sbt_range);
+        rd->free_rid(hardware.sbt);
+    }
+    if (hardware.pipeline.is_valid())
+        rd->free_rid(hardware.pipeline);
+    if (hardware.shader.is_valid())
+        rd->free_rid(hardware.shader);
     if (sampler.is_valid())
         rd->free_rid(sampler);
     if (texture_array.is_valid())
         rd->free_rid(texture_array);
-    frame_buffer.free(rd);
-    bvh_buffer.free(rd);
-    triangle_buffer.free(rd);
-    triangle_data_buffer.free(rd);
-    material_buffer.free(rd);
-    instance_material_buffer.free(rd);
-    instance_buffer.free(rd);
-    tlas_buffer.free(rd);
-    emissive_buffer.free(rd);
-    light_buffer.free(rd);
-    shader = RID();
-    pipeline = RID();
+    for (GpuBuffer *b : {&frame_buffer, &bvh_buffer, &triangle_buffer, &triangle_data_buffer, &material_buffer,
+                         &instance_material_buffer, &instance_buffer, &tlas_buffer, &emissive_buffer, &light_buffer,
+                         &portal_buffer})
+        b->free(rd);
+    software = Pipeline();
+    hardware = Pipeline();
     sampler = RID();
     texture_array = RID();
     device = nullptr;
 }
 
-bool PathTracingEffect::ensure_pipeline(RenderingDevice *rd)
+bool PathTracingEffect::ensure_pipeline(RenderingDevice *rd, Pipeline &p, const Ref<RDShaderFile> &file,
+                                        const char *name)
 {
-    if (pipeline.is_valid())
+    if (p.pipeline.is_valid())
         return true;
-    if (shader_failed)
-        return false;
-
-    Ref<RDShaderFile> file;
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        file = shader_file;
-    }
-    if (file.is_null())
+    if (p.failed || file.is_null())
         return false;
 
     Ref<RDShaderSPIRV> spirv = file->get_spirv();
-    if (spirv.is_null())
-    {
-        UtilityFunctions::printerr("[PathTracing] shader has no SPIR-V");
-        shader_failed = true;
-        return false;
-    }
-    String err = spirv->get_stage_compile_error(RenderingDevice::SHADER_STAGE_COMPUTE);
+    String err = spirv.is_valid() ? spirv->get_stage_compile_error(RenderingDevice::SHADER_STAGE_COMPUTE)
+                                  : String("no SPIR-V");
     if (!err.is_empty())
     {
-        UtilityFunctions::printerr("[PathTracing] shader compile error:\n", err);
-        shader_failed = true;
+        UtilityFunctions::printerr("[PathTracing] ", name, " shader compile error:\n", err);
+        p.failed = true;
         return false;
     }
-    shader = rd->shader_create_from_spirv(spirv, "jar_path_tracing");
-    if (!shader.is_valid())
+    p.shader = rd->shader_create_from_spirv(spirv, name);
+    if (!p.shader.is_valid())
     {
-        shader_failed = true;
+        p.failed = true;
         return false;
     }
-    pipeline = rd->compute_pipeline_create(shader);
+    p.pipeline = rd->compute_pipeline_create(p.shader);
+    if (!p.pipeline.is_valid())
+    {
+        p.failed = true;
+        return false;
+    }
+    return true;
+}
 
+void PathTracingEffect::ensure_sampler(RenderingDevice *rd)
+{
+    if (sampler.is_valid())
+        return;
     Ref<RDSamplerState> ss;
     ss.instantiate();
     ss->set_min_filter(RenderingDevice::SAMPLER_FILTER_LINEAR);
@@ -190,12 +238,147 @@ bool PathTracingEffect::ensure_pipeline(RenderingDevice *rd)
     ss->set_repeat_u(RenderingDevice::SAMPLER_REPEAT_MODE_REPEAT);
     ss->set_repeat_v(RenderingDevice::SAMPLER_REPEAT_MODE_REPEAT);
     sampler = rd->sampler_create(ss);
-    return pipeline.is_valid();
 }
 
-void PathTracingEffect::upload_scene(RenderingDevice *rd, const SceneSnapshot &snap)
+bool PathTracingEffect::ensure_raytracing_pipeline(RenderingDevice *rd, Pipeline &p, const Ref<RDShaderFile> &file)
 {
-    if (snap.geometry_version != geometry_version)
+    if (p.pipeline.is_valid())
+        return true;
+    if (p.failed || file.is_null())
+        return false;
+
+    Ref<RDShaderSPIRV> spirv = file->get_spirv();
+    if (spirv.is_null())
+    {
+        p.failed = true;
+        return false;
+    }
+    const RenderingDevice::ShaderStage stages[] = {RenderingDevice::SHADER_STAGE_RAYGEN,
+                                                   RenderingDevice::SHADER_STAGE_MISS,
+                                                   RenderingDevice::SHADER_STAGE_CLOSEST_HIT};
+    for (RenderingDevice::ShaderStage stage : stages)
+    {
+        String err = spirv->get_stage_compile_error(stage);
+        if (!err.is_empty())
+        {
+            UtilityFunctions::printerr("[PathTracing] hardware shader compile error (stage ", (int)stage, "):\n", err);
+            p.failed = true;
+            return false;
+        }
+    }
+    p.shader = rd->shader_create_from_spirv(spirv, "jar_path_tracing_hw");
+    if (!p.shader.is_valid())
+    {
+        p.failed = true;
+        return false;
+    }
+
+    // One shader holds the raygen, miss and closest-hit stages.
+    Ref<RDPipelineShader> ps;
+    ps.instantiate();
+    ps->set_shader(p.shader);
+    Ref<RDHitGroup> hit_group;
+    hit_group.instantiate();
+    hit_group->set_closest_hit_shader(ps);
+    TypedArray<RDPipelineShader> raygen, miss;
+    raygen.push_back(ps);
+    miss.push_back(ps);
+    TypedArray<RDHitGroup> hit_groups;
+    hit_groups.push_back(hit_group);
+    p.pipeline = rd->raytracing_pipeline_create(raygen, miss, hit_groups, 1);
+    if (!p.pipeline.is_valid())
+    {
+        p.failed = true;
+        return false;
+    }
+    p.sbt = rd->hit_sbt_create(p.pipeline, 16);
+    p.sbt_range = rd->hit_sbt_range_alloc(p.sbt, 1);
+    PackedInt32Array groups;
+    groups.push_back(0);
+    rd->hit_sbt_range_update(p.sbt, p.sbt_range, 0, groups);
+    return true;
+}
+
+void PathTracingEffect::build_hardware_structures(RenderingDevice *rd, const SceneSnapshot &snap,
+                                                  bool geometry_changed, bool instances_changed)
+{
+    if (geometry_changed || blases.empty())
+    {
+        free_hardware_structures(rd);
+        for (const PackedByteArray &verts : snap.blas_vertices)
+        {
+            uint32_t vertex_count = static_cast<uint32_t>(verts.size() / 12);
+            RID vb = rd->vertex_buffer_create(
+                static_cast<uint32_t>(verts.size()), verts,
+                RenderingDevice::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT |
+                    RenderingDevice::BUFFER_CREATION_DEVICE_ADDRESS_BIT);
+            Ref<RDAccelerationStructureGeometry> geo;
+            geo.instantiate();
+            geo->set_flags(RenderingDevice::ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT);
+            geo->set_vertex_buffer(vb);
+            geo->set_vertex_offset(0);
+            geo->set_vertex_stride(12);
+            geo->set_vertex_count(vertex_count);
+            geo->set_vertex_format(RenderingDevice::DATA_FORMAT_R32G32B32_SFLOAT);
+            TypedArray<RDAccelerationStructureGeometry> geos;
+            geos.push_back(geo);
+            RID blas = rd->blas_create(geos, RenderingDevice::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
+            if (blas.is_valid())
+                rd->blas_build(blas);
+            blas_vertex_buffers.push_back(vb);
+            blases.push_back(blas);
+            blas_vertex_counts.push_back(vertex_count);
+        }
+        instances_changed = true;
+    }
+
+    if (!instances_changed || blases.empty())
+        return;
+
+    uint32_t needed = MAX(1u, static_cast<uint32_t>(snap.hw_instances.size()));
+    if (!hw_tlas.is_valid() || needed > hw_tlas_capacity)
+    {
+        if (hw_tlas.is_valid())
+            rd->free_rid(hw_tlas);
+        hw_tlas_capacity = MAX(needed + needed / 2, 16u);
+        hw_tlas = rd->tlas_create(hw_tlas_capacity, RenderingDevice::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
+    }
+
+    TypedArray<RDAccelerationStructureInstance> list;
+    for (const HwInstance &hi : snap.hw_instances)
+    {
+        if (hi.mesh >= blases.size() || !blases[hi.mesh].is_valid())
+            continue;
+        Ref<RDAccelerationStructureInstance> inst;
+        inst.instantiate();
+        inst->set_transform(hi.transform);
+        inst->set_id(hi.index);
+        inst->set_mask(0xFF);
+        inst->set_blas(blases[hi.mesh]);
+        inst->set_hit_sbt_range(hardware.sbt_range);
+        inst->set_flags(RenderingDevice::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT |
+                        RenderingDevice::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT);
+        list.push_back(inst);
+    }
+    if (list.is_empty())
+    {
+        // Keep the TLAS valid with an instance that no ray can hit (mask 0).
+        Ref<RDAccelerationStructureInstance> inst;
+        inst.instantiate();
+        inst->set_mask(0);
+        inst->set_blas(blases[0]);
+        inst->set_hit_sbt_range(hardware.sbt_range);
+        list.push_back(inst);
+    }
+    rd->tlas_build(hw_tlas, list);
+}
+
+void PathTracingEffect::upload_scene(RenderingDevice *rd, const SceneSnapshot &snap, bool use_hardware)
+{
+    bool geometry_changed = snap.geometry_version != geometry_version;
+    bool instances_changed = snap.instance_version != instance_version;
+
+    if (geometry_changed)
     {
         geometry_version = snap.geometry_version;
         bvh_buffer.upload(rd, snap.bvh_nodes);
@@ -227,17 +410,31 @@ void PathTracingEffect::upload_scene(RenderingDevice *rd, const SceneSnapshot &s
         }
     }
 
-    if (snap.instance_version != instance_version)
+    if (instances_changed)
     {
         instance_version = snap.instance_version;
         instance_buffer.upload(rd, snap.instances);
         tlas_buffer.upload(rd, snap.tlas_nodes);
         emissive_buffer.upload(rd, snap.emissive_triangles);
         light_buffer.upload(rd, snap.punctual_lights);
+        portal_buffer.upload(rd, snap.portals);
         instance_count = snap.instance_count;
         emissive_count = snap.emissive_count;
         punctual_count = snap.punctual_count;
+        portal_count = snap.portal_count;
         emissive_total_power = snap.emissive_total_power;
+    }
+
+    if (use_hardware)
+    {
+        bool hw_geo = hw_geometry_version != geometry_version;
+        bool hw_inst = hw_instance_version != instance_version;
+        if (hw_geo || hw_inst)
+        {
+            build_hardware_structures(rd, snap, hw_geo, hw_inst);
+            hw_geometry_version = geometry_version;
+            hw_instance_version = instance_version;
+        }
     }
 }
 
@@ -255,76 +452,122 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
 
     SceneDataPtr scene_ptr;
     RenderSettings current;
+    Ref<RDShaderFile> sw_file, hw_file;
     {
         std::lock_guard<std::mutex> lock(mutex);
         scene_ptr = scene;
         current = settings;
+        sw_file = software_file;
+        hw_file = hardware_file;
     }
-    if (!scene_ptr || !ensure_pipeline(rd))
+    if (!scene_ptr)
         return;
+
+    // Pick the backend: hardware ray tracing pipeline when allowed and supported, software otherwise.
+    bool use_hardware = false;
+    if (current.backend != BACKEND_SOFTWARE && rd->has_feature(RenderingDevice::SUPPORTS_RAYTRACING_PIPELINE))
+        use_hardware = ensure_raytracing_pipeline(rd, hardware, hw_file);
+    if (!use_hardware && current.backend == BACKEND_HARDWARE)
+    {
+        static bool warned = false;
+        if (!warned)
+            UtilityFunctions::push_warning("[PathTracing] hardware ray tracing unavailable, using software tracing");
+        warned = true;
+    }
+    if (!use_hardware && !ensure_pipeline(rd, software, sw_file, "jar_path_tracing_sw"))
+        return;
+    const Pipeline &pipe = use_hardware ? hardware : software;
 
     Ref<RenderSceneBuffersRD> buffers = p_render_data->get_render_scene_buffers();
     RenderSceneData *scene_data = p_render_data->get_render_scene_data();
     if (buffers.is_null() || scene_data == nullptr)
         return;
-
     const Vector2i size = buffers->get_internal_size();
     if (size.x <= 0 || size.y <= 0)
         return;
 
     bool reset = reset_requested.exchange(false);
+    if (use_hardware != was_hardware)
+        reset = true;
+    was_hardware = use_hardware;
 
     // Upload whatever changed on the main thread.
     SceneSnapshot snap = scene_ptr->snapshot();
     const uint64_t prev_geometry = geometry_version;
     const uint64_t prev_instances = instance_version;
-    upload_scene(rd, snap);
-    if (geometry_version != prev_geometry || instance_version != prev_instances)
+    upload_scene(rd, snap, use_hardware);
+    const bool scene_moved = instance_version != prev_instances;
+    if (geometry_version != prev_geometry)
         reset = true;
     if (!bvh_buffer.rid().is_valid() || !instance_buffer.rid().is_valid() || !texture_array.is_valid())
         return;
+    if (use_hardware && !hw_tlas.is_valid())
+        return;
+    active_backend = use_hardware ? 2 : 1;
 
-    // Accumulation target lives in the render buffers, so it follows viewport resizes automatically.
-    if (!buffers->has_texture(CONTEXT, ACCUM_NAME))
+    // History targets live in the render buffers, so they follow viewport resizes automatically.
+    for (int i = 0; i < 2; i++)
     {
-        buffers->create_texture(CONTEXT, ACCUM_NAME, RenderingDevice::DATA_FORMAT_R32G32B32A32_SFLOAT,
-                                RenderingDevice::TEXTURE_USAGE_STORAGE_BIT |
-                                    RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT,
-                                RenderingDevice::TEXTURE_SAMPLES_1, size, 1, 1, true, false);
-    }
-    RID accum = buffers->get_texture(CONTEXT, ACCUM_NAME);
-    if (accum != accum_texture)
-    {
-        accum_texture = accum;
-        reset = true;
+        RID h = ensure_texture(buffers, HISTORY_NAMES[i], size);
+        RID g = ensure_texture(buffers, GBUFFER_NAMES[i], size);
+        if (h != history_textures[i] || g != gbuffer_textures[i])
+            reset = true;
+        history_textures[i] = h;
+        gbuffer_textures[i] = g;
     }
 
     const Transform3D cam_transform = scene_data->get_cam_transform();
     const Projection projection = scene_data->get_cam_projection();
-    if (cam_transform != last_cam_transform || !projection_equal(projection, last_projection))
+    const bool camera_moved = cam_transform != last_cam_transform || !projection_equal(projection, last_projection);
+    if (!current.same_image(last_settings))
         reset = true;
-    if (current != last_settings)
+
+    const bool temporal = current.accumulate && current.temporal_reprojection;
+    if (!has_previous)
         reset = true;
-    last_cam_transform = cam_transform;
-    last_projection = projection;
-    last_settings = current;
+    if (!temporal && (camera_moved || scene_moved))
+        reset = true; // plain accumulation restarts on any change
 
-    if (reset || !current.accumulate)
-        sample_index = 0;
+    const bool changed = reset || camera_moved || scene_moved;
+    if (changed)
+    {
+        frames_since_change = 0;
+        motion_cooldown = 2;
+    }
+    else if (motion_cooldown > 0)
+    {
+        motion_cooldown--;
+    }
 
-    const bool done = current.accumulate && current.max_samples > 0 &&
-                      sample_index >= static_cast<uint32_t>(current.max_samples);
+    // While things move, keep a short rolling history; once static, accumulate without limit.
+    uint32_t history_cap;
+    if (!current.accumulate)
+        history_cap = 1;
+    else if (temporal && motion_cooldown > 0)
+        history_cap = static_cast<uint32_t>(MAX(current.temporal_max_history, 1));
+    else
+        history_cap = current.max_samples > 0 ? static_cast<uint32_t>(current.max_samples) : UNLIMITED_HISTORY;
+
+    const bool done = current.accumulate && current.max_samples > 0 && !changed && motion_cooldown == 0 &&
+                      frames_since_change >= static_cast<uint32_t>(current.max_samples);
 
     FrameData fd{};
     write_transform(fd.cam_to_world, cam_transform);
     write_projection(fd.inv_projection, projection.inverse());
+    const Transform3D prev_cam = has_previous ? last_cam_transform : cam_transform;
+    const Projection prev_proj = has_previous ? last_projection : projection;
+    write_projection(fd.prev_view_proj, prev_proj * Projection(prev_cam.affine_inverse()));
+    fd.prev_cam_pos[0] = prev_cam.origin.x;
+    fd.prev_cam_pos[1] = prev_cam.origin.y;
+    fd.prev_cam_pos[2] = prev_cam.origin.z;
+    fd.prev_cam_pos[3] = 1.0f;
     write_color(fd.sky_top, current.sky_top, current.sky_energy);
     write_color(fd.sky_horizon, current.sky_horizon, current.sky_energy);
     write_color(fd.ground, current.ground, current.sky_energy);
     fd.size[0] = size.x;
     fd.size[1] = size.y;
     fd.frame_index = frame_index++;
-    fd.sample_index = sample_index;
+    fd.history_cap = history_cap;
     fd.max_bounces = static_cast<uint32_t>(MAX(current.max_bounces, 0));
     fd.samples_per_pixel = static_cast<uint32_t>(MAX(current.samples_per_pixel, 1));
     fd.instance_count = instance_count;
@@ -333,39 +576,70 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
     fd.emissive_total_power = emissive_total_power;
     fd.firefly_clamp = current.firefly_clamp;
     fd.debug_mode = static_cast<uint32_t>(current.debug_mode);
-    fd.flags = (current.accumulate ? FLAG_ACCUMULATE : 0u) | (done ? FLAG_COPY_ONLY : 0u);
+    fd.portal_count = portal_count;
+    fd.max_portal_hops = static_cast<uint32_t>(MAX(current.max_portal_hops, 0));
+    fd.flags = (temporal ? FLAG_REPROJECT : 0u) | (done ? FLAG_COPY_ONLY : 0u) | (reset ? FLAG_RESET : 0u);
     frame_buffer.upload(rd, to_bytes(&fd, 1));
 
-    RID color = buffers->get_color_layer(0);
+    last_cam_transform = cam_transform;
+    last_projection = projection;
+    last_settings = current;
+    has_previous = true;
+
+    const uint32_t write_slot = parity;
+    const uint32_t read_slot = 1u - parity;
 
     TypedArray<RDUniform> set0;
     set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_UNIFORM_BUFFER, 0, {frame_buffer.rid()}));
-    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 1, {color}));
-    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 2, {accum}));
+    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 1, {buffers->get_color_layer(0)}));
+    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 2, {history_textures[write_slot]}));
+    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 3, {history_textures[read_slot]}));
+    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 4, {gbuffer_textures[write_slot]}));
+    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 5, {gbuffer_textures[read_slot]}));
 
     TypedArray<RDUniform> set1;
-    const RID storage[] = {bvh_buffer.rid(),       triangle_buffer.rid(), triangle_data_buffer.rid(),
-                           material_buffer.rid(),  instance_material_buffer.rid(), instance_buffer.rid(),
-                           tlas_buffer.rid(),      emissive_buffer.rid(), light_buffer.rid()};
-    for (int i = 0; i < 9; i++)
+    const RID storage[] = {bvh_buffer.rid(),      triangle_buffer.rid(), triangle_data_buffer.rid(),
+                           material_buffer.rid(), instance_material_buffer.rid(), instance_buffer.rid(),
+                           tlas_buffer.rid(),     emissive_buffer.rid(), light_buffer.rid(),
+                           portal_buffer.rid()};
+    for (int i = 0; i < 10; i++)
         set1.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_STORAGE_BUFFER, i, {storage[i]}));
+    if (use_hardware)
+        set1.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 10, {hw_tlas}));
 
+    ensure_sampler(rd);
     TypedArray<RDUniform> set2;
     set2.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, {sampler, texture_array}));
 
-    RID us0 = UniformSetCacheRD::get_cache(shader, 0, set0);
-    RID us1 = UniformSetCacheRD::get_cache(shader, 1, set1);
-    RID us2 = UniformSetCacheRD::get_cache(shader, 2, set2);
+    RID us0 = UniformSetCacheRD::get_cache(pipe.shader, 0, set0);
+    RID us1 = UniformSetCacheRD::get_cache(pipe.shader, 1, set1);
+    RID us2 = UniformSetCacheRD::get_cache(pipe.shader, 2, set2);
 
-    int64_t list = rd->compute_list_begin();
-    rd->compute_list_bind_compute_pipeline(list, pipeline);
-    rd->compute_list_bind_uniform_set(list, us0, 0);
-    rd->compute_list_bind_uniform_set(list, us1, 1);
-    rd->compute_list_bind_uniform_set(list, us2, 2);
-    rd->compute_list_dispatch(list, (size.x + 7) / 8, (size.y + 7) / 8, 1);
-    rd->compute_list_end();
+    if (use_hardware)
+    {
+        int64_t list = rd->raytracing_list_begin();
+        rd->raytracing_list_bind_raytracing_pipeline(list, pipe.pipeline);
+        rd->raytracing_list_bind_uniform_set(list, us0, 0);
+        rd->raytracing_list_bind_uniform_set(list, us1, 1);
+        rd->raytracing_list_bind_uniform_set(list, us2, 2);
+        rd->raytracing_list_trace_rays(list, 0, pipe.sbt, size.x, size.y, 1);
+        rd->raytracing_list_end();
+    }
+    else
+    {
+        int64_t list = rd->compute_list_begin();
+        rd->compute_list_bind_compute_pipeline(list, pipe.pipeline);
+        rd->compute_list_bind_uniform_set(list, us0, 0);
+        rd->compute_list_bind_uniform_set(list, us1, 1);
+        rd->compute_list_bind_uniform_set(list, us2, 2);
+        rd->compute_list_dispatch(list, (size.x + 7) / 8, (size.y + 7) / 8, 1);
+        rd->compute_list_end();
+    }
 
-    if (current.accumulate && !done)
-        sample_index++;
-    sample_count = static_cast<int>(current.accumulate ? sample_index : 1);
+    if (!done)
+    {
+        parity = 1u - parity;
+        frames_since_change++;
+    }
+    sample_count = static_cast<int>(current.accumulate ? frames_since_change : 1);
 }

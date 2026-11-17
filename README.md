@@ -7,11 +7,13 @@ This project aims to add a basic Pathtracer to godot using compute shaders. It's
 
 ## Features
 
-- **Path tracer:** GPU compute path tracer (software BVH traversal) running as a `CompositorEffect` on Godot's main RenderingDevice. It writes HDR radiance straight into the scene color buffer, so Godot's tonemapper, exposure and glow apply as usual.
+- **Path tracer:** runs as a `CompositorEffect` on Godot's main RenderingDevice and writes HDR radiance straight into the scene color buffer, so Godot's tonemapper, exposure and glow apply as usual.
+- **Hardware and software tracing:** uses the GPU's ray tracing cores through Godot 4.7's ray tracing pipeline when available, and falls back to a software BVH in a compute shader otherwise. Both produce the same image.
 - **Scene loading:** every `MeshInstance3D` below a `GeometryGroup3D` is rendered by a `PathTracingCamera`. Transforms and visibility are tracked every frame, so objects can move.
 - **Lighting:** next event estimation with multiple importance sampling for emissive materials, plus `DirectionalLight3D`, `OmniLight3D` and `SpotLight3D` with soft shadows.
 - **Materials:** `StandardMaterial3D`/`ORMMaterial3D` are converted automatically: albedo color and texture (with UV scale/offset), metallic, roughness, emission.
-- **Progressive accumulation** when the view and scene are static, plus debug views (normals, albedo, BVH traversal cost).
+- **Temporal accumulation:** samples are reprojected across frames when the camera or objects move, and accumulate without limit when everything is still. Debug views show normals, albedo and BVH traversal cost.
+- **Portals:** `Portal3D` nodes link two rectangles in space; rays (and the demo camera) pass through.
 
 Requires **Godot 4.7** and the Forward+ renderer.
 
@@ -30,11 +32,11 @@ scons target=template_debug -j16
 
 1. Put your scene's meshes and lights under a `GeometryGroup3D` node.
 2. Use a `PathTracingCamera` (a `Camera3D`) and point its `geometry_group` at the group.
-3. Run the scene. See `project/demo/demo.tscn` and `project/demo/lights_demo.tscn`.
+3. Run the scene. See `project/demo/demo.tscn`, `project/demo/lights_demo.tscn` and `project/demo/portal_demo.tscn`.
 
 Disable TAA/FSR on the viewport. To change meshes or materials at runtime, call `GeometryGroup3D.build()`; moving and hiding instances needs nothing.
 
-Implementation notes, limitations and the roadmap (hardware ray tracing, portals, denoising) are in [docs/NOTES.md](docs/NOTES.md).
+Implementation notes, measurements, limitations and the roadmap (denoising, a portal puzzle demo) are in [docs/NOTES.md](docs/NOTES.md).
 
 ## Contributing
 

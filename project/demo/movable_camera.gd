@@ -1,14 +1,17 @@
 extends Node3D
 ## Free-fly camera. WASD to move, Q/E down/up, mouse wheel changes speed, Esc toggles mouse capture.
+## Flying through the front of a linked Portal3D teleports the camera to the other side.
 
 @export var move_speed : float = 8.0
 const MIN_MOVE_SPEED = 0.5
 const MAX_MOVE_SPEED = 512
 var rotating : bool = false
+var _portals : Array[Node] = []
 
 
 func _ready() -> void:
 	set_mouse(true)
+	_portals = get_tree().root.find_children("*", "Portal3D", true, false)
 
 
 func _process(delta : float) -> void:
@@ -20,7 +23,16 @@ func _process(delta : float) -> void:
 		up = Vector3.DOWN
 	var move_dir := transform.basis.z * wish.y + transform.basis.x * wish.x + up
 	if move_dir != Vector3.ZERO:
+		var from := global_position
 		position += move_dir.normalized() * move_speed * delta / Engine.time_scale
+		_cross_portals(from, global_position)
+
+
+func _cross_portals(from: Vector3, to: Vector3) -> void:
+	for portal in _portals:
+		if portal.linked_portal and portal.is_crossing(from, to):
+			global_transform = portal.get_teleport_transform() * global_transform
+			return
 
 
 func _input(event) -> void:

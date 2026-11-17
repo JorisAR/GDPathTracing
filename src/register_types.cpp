@@ -2,6 +2,7 @@
 #include "path_tracing/path_tracing_camera.h"
 #include "path_tracing/geometry_group3d.h"
 #include "path_tracing/path_tracing_effect.h"
+#include "path_tracing/portal3d.h"
 
 using namespace godot;
 
@@ -11,6 +12,7 @@ void initialize_jar_path_tracing_module(ModuleInitializationLevel p_level)
     {
         GDREGISTER_CLASS(GeometryGroup3D)
         GDREGISTER_CLASS(PathTracingEffect)
+        GDREGISTER_CLASS(Portal3D)
         GDREGISTER_CLASS(PathTracingCamera)
     }
 }

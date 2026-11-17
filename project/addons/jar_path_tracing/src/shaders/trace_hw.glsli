@@ -1,0 +1,38 @@
+// Hardware ray traversal through the ray tracing pipeline. Same interface as trace_sw.glsli.
+// The TLAS instance custom index is our instance index; primitive indices are local to the
+// BLAS, whose vertices are stored in the same (BVH) order as the triangle buffers.
+
+// Requires hw_payload.glsli to be included first (Godot does not resolve nested includes).
+
+layout(set = 1, binding = 10) uniform accelerationStructureEXT scene_tlas;
+layout(location = 0) rayPayloadEXT HwPayload payload;
+
+bool trace_closest(const Ray r, const float t_max, out Hit hit) {
+    hit.t = t_max;
+    hit.bary = vec2(0.0);
+    hit.instance = 0u;
+    hit.triangle = 0u;
+    hit.steps = 0u;
+    if (frame.instance_count == 0u) return false;
+
+    payload.hit = 0u;
+    traceRayEXT(scene_tlas, gl_RayFlagsOpaqueEXT, 0xFF, 0, 0, 0, r.o, 0.0, r.d, t_max, 0);
+    if (payload.hit == 0u) return false;
+
+    hit.t = payload.t;
+    hit.bary = payload.bary;
+    hit.instance = payload.instance;
+    hit.triangle = instances[payload.instance].triangle_offset + payload.primitive;
+    hit.steps = 1u;
+    return true;
+}
+
+bool trace_any(const Ray r, const float t_max) {
+    if (frame.instance_count == 0u) return false;
+    // Skip the closest-hit shader: the payload keeps hit = 1 unless the miss shader runs.
+    payload.hit = 1u;
+    traceRayEXT(scene_tlas,
+                gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                0xFF, 0, 0, 0, r.o, 0.0, r.d, t_max, 0);
+    return payload.hit != 0u;
+}

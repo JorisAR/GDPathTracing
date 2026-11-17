@@ -6,6 +6,10 @@ var _path := ""
 var _frames := 120
 var _elapsed := 0.0
 var _counted := 0
+var _gpu_elapsed := 0.0
+var _pan := false
+var _pan_time := 0.0
+var _walk := false
 
 
 func _ready() -> void:
@@ -23,23 +27,53 @@ func _ready() -> void:
 			var cam := get_viewport().get_camera_3d()
 			if cam and "debug_view" in cam:
 				cam.debug_view = int(arg.trim_prefix("--debug-view="))
+		elif arg.begins_with("--backend="):
+			var cam := get_viewport().get_camera_3d()
+			if cam and "backend" in cam:
+				cam.backend = int(arg.trim_prefix("--backend="))
+		elif arg == "--no-temporal":
+			var cam := get_viewport().get_camera_3d()
+			if cam and "temporal_reprojection" in cam:
+				cam.temporal_reprojection = false
+		elif arg == "--pan":
+			# Sway the camera to exercise temporal reprojection.
+			_pan = true
+		elif arg == "--walk":
+			# Hold "forward" until the camera has teleported through a portal (portal_demo).
+			_walk = true
+			Input.action_press("move_forward")
 		elif arg == "--static":
 			# Freeze animations so accumulation can converge.
 			for node in get_tree().get_nodes_in_group("animated"):
 				node.set_process(false)
 	if _path.is_empty():
 		queue_free()
+		return
+	RenderingServer.viewport_set_measure_render_time(get_viewport().get_viewport_rid(), true)
 
 
 func _process(delta: float) -> void:
 	_frames -= 1
+	if _pan:
+		_pan_time += delta
+		var cam := get_viewport().get_camera_3d()
+		if cam:
+			cam.position.x = sin(_pan_time * 0.8) * 1.2
+			cam.rotation.y = sin(_pan_time * 0.8) * 0.15
 	if _counted >= 0 and Engine.get_process_frames() > 10:
 		_elapsed += delta
+		_gpu_elapsed += RenderingServer.viewport_get_measured_render_time_gpu(get_viewport().get_viewport_rid())
 		_counted += 1
+	if _walk:
+		var cam := get_viewport().get_camera_3d()
+		if cam and cam.global_position.z < -10.0:
+			Input.action_release("move_forward")
+			print("[capture] walked through a portal, camera now at ", cam.global_position.snappedf(0.01), " facing ", (-cam.global_basis.z).snappedf(0.01))
+			_walk = false
 	if _frames > 0:
 		return
 	if _counted > 0:
-		print("[capture] average frame time %.2f ms over %d frames" % [_elapsed / _counted * 1000.0, _counted])
+		print("[capture] average frame time %.2f ms (GPU %.2f ms) over %d frames" % [_elapsed / _counted * 1000.0, _gpu_elapsed / _counted, _counted])
 	var image := get_viewport().get_texture().get_image()
 	image.save_png(_path)
 	print("[capture] saved ", _path)

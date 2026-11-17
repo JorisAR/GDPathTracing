@@ -2,6 +2,7 @@
 #define PT_SCENE_DATA_H
 
 #include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/variant/transform3d.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 
 #include <cstdint>
@@ -11,6 +12,14 @@
 
 namespace PT
 {
+
+// Instance as needed for the hardware TLAS.
+struct HwInstance
+{
+    godot::Transform3D transform;
+    uint32_t mesh;  // index into SceneSnapshot::blas_vertices
+    uint32_t index; // instance index (shader custom index)
+};
 
 // CPU side copy of everything the GPU needs. Produced on the main thread by GeometryGroup3D,
 // consumed on the render thread by PathTracingEffect. PackedByteArrays are copy-on-write, so
@@ -26,6 +35,8 @@ struct SceneSnapshot
     godot::PackedByteArray instance_materials;
     std::vector<godot::Ref<godot::Image>> textures; // RGBA8, all texture_resolution^2
     int texture_resolution = 1;
+    // Per mesh, triangle soup positions (3 x float3 per triangle) in BVH order, for hardware BLASes.
+    std::vector<godot::PackedByteArray> blas_vertices;
 
     // Dynamic data: changes whenever an instance or light moves / toggles visibility.
     uint64_t instance_version = 0;
@@ -33,9 +44,12 @@ struct SceneSnapshot
     godot::PackedByteArray tlas_nodes;
     godot::PackedByteArray emissive_triangles;
     godot::PackedByteArray punctual_lights;
+    godot::PackedByteArray portals;
+    std::vector<HwInstance> hw_instances; // visible instances only
     uint32_t instance_count = 0; // instances referenced by the TLAS
     uint32_t emissive_count = 0;
     uint32_t punctual_count = 0;
+    uint32_t portal_count = 0;
     float emissive_total_power = 0.0f;
 };
 

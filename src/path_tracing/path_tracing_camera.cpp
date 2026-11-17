@@ -9,6 +9,7 @@
 #include <godot_cpp/variant/utility_functions.hpp>
 
 static const char *SHADER_PATH = "res://addons/jar_path_tracing/src/shaders/main.glsl";
+static const char *HW_SHADER_PATH = "res://addons/jar_path_tracing/src/shaders/main_hw.glsl";
 
 void PathTracingCamera::_bind_methods()
 {
@@ -19,14 +20,18 @@ void PathTracingCamera::_bind_methods()
 
     PT_PROP(Variant::OBJECT, geometry_group, PROPERTY_HINT_NODE_TYPE, "GeometryGroup3D")
     PT_PROP(Variant::BOOL, path_tracing_enabled, PROPERTY_HINT_NONE, "")
+    PT_PROP(Variant::INT, backend, PROPERTY_HINT_ENUM, "Auto,Software,Hardware")
 
     ADD_GROUP("Sampling", "");
     PT_PROP(Variant::INT, max_bounces, PROPERTY_HINT_RANGE, "0,32,1")
     PT_PROP(Variant::INT, samples_per_pixel, PROPERTY_HINT_RANGE, "1,64,1")
     PT_PROP(Variant::BOOL, accumulate, PROPERTY_HINT_NONE, "")
+    PT_PROP(Variant::BOOL, temporal_reprojection, PROPERTY_HINT_NONE, "")
+    PT_PROP(Variant::INT, temporal_max_history, PROPERTY_HINT_RANGE, "1,256,1")
     PT_PROP(Variant::INT, max_samples, PROPERTY_HINT_RANGE, "0,65536,1,or_greater")
     PT_PROP(Variant::FLOAT, firefly_clamp, PROPERTY_HINT_RANGE, "0,100,0.1,or_greater")
     PT_PROP(Variant::INT, debug_view, PROPERTY_HINT_ENUM, "None,Normals,Albedo,Traversal Cost")
+    PT_PROP(Variant::INT, max_portal_hops, PROPERTY_HINT_RANGE, "0,64,1")
 
     ADD_GROUP("Sky", "");
     PT_PROP(Variant::COLOR, sky_top_color, PROPERTY_HINT_NONE, "")
@@ -37,6 +42,11 @@ void PathTracingCamera::_bind_methods()
 
     ClassDB::bind_method(D_METHOD("get_sample_count"), &PathTracingCamera::get_sample_count);
     ClassDB::bind_method(D_METHOD("reset_accumulation"), &PathTracingCamera::reset_accumulation);
+    ClassDB::bind_method(D_METHOD("get_active_backend"), &PathTracingCamera::get_active_backend);
+
+    BIND_ENUM_CONSTANT(BACKEND_AUTO);
+    BIND_ENUM_CONSTANT(BACKEND_SOFTWARE);
+    BIND_ENUM_CONSTANT(BACKEND_HARDWARE);
 
     BIND_ENUM_CONSTANT(DEBUG_NONE);
     BIND_ENUM_CONSTANT(DEBUG_NORMALS);
@@ -88,9 +98,11 @@ void PathTracingCamera::setup()
         UtilityFunctions::printerr("[PathTracing] could not load ", SHADER_PATH);
         return;
     }
+    // Optional: only used when the GPU supports the ray tracing pipeline.
+    Ref<RDShaderFile> hw_shader_file = ResourceLoader::get_singleton()->load(HW_SHADER_PATH);
 
     effect.instantiate();
-    effect->set_shader_file(shader_file);
+    effect->set_shader_files(shader_file, hw_shader_file);
     effect->set_scene(geometry_group->get_scene_data());
 
     Ref<Compositor> compositor = get_compositor();
@@ -212,6 +224,44 @@ float PathTracingCamera::get_sky_energy() const
 void PathTracingCamera::set_sky_energy(float value)
 {
     settings.sky_energy = MAX(0.0f, value);
+}
+
+PathTracingCamera::Backend PathTracingCamera::get_backend() const
+{
+    return static_cast<Backend>(settings.backend);
+}
+void PathTracingCamera::set_backend(Backend value)
+{
+    settings.backend = static_cast<int>(value);
+}
+bool PathTracingCamera::get_temporal_reprojection() const
+{
+    return settings.temporal_reprojection;
+}
+void PathTracingCamera::set_temporal_reprojection(bool value)
+{
+    settings.temporal_reprojection = value;
+}
+int PathTracingCamera::get_temporal_max_history() const
+{
+    return settings.temporal_max_history;
+}
+void PathTracingCamera::set_temporal_max_history(int value)
+{
+    settings.temporal_max_history = MAX(1, value);
+}
+int PathTracingCamera::get_max_portal_hops() const
+{
+    return settings.max_portal_hops;
+}
+void PathTracingCamera::set_max_portal_hops(int value)
+{
+    settings.max_portal_hops = MAX(0, value);
+}
+String PathTracingCamera::get_active_backend() const
+{
+    int b = effect.is_valid() ? effect->get_active_backend() : 0;
+    return b == 2 ? "Hardware (RT pipeline)" : (b == 1 ? "Software (compute BVH)" : "Inactive");
 }
 
 int PathTracingCamera::get_sample_count() const

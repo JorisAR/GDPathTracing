@@ -1,7 +1,8 @@
 # Renderer modernization notes
 
-Notes on the rework that brought the plugin to Godot 4.7 and implemented roadmap phases 0–3.
-Phases 4+ (hardware ray tracing, portals, denoising, demo game) are still to do; see the end.
+Notes on the rework that brought the plugin to Godot 4.7. Phases 0–3 (toolchain, pipeline,
+lighting, dynamic scenes) came first; then the hardware ray tracing backend, temporal
+accumulation and portals. A spatial denoiser and the portal puzzle game are still to do (see the end).
 
 ## TL;DR
 
@@ -13,12 +14,22 @@ Phases 4+ (hardware ray tracing, portals, denoising, demo game) are still to do;
 | Workgroups | 32×32 (1024 threads, poor occupancy) | 8×8 |
 | Lighting | BSDF sampling only | NEE on emissive triangles (power-proportional CDF) + MIS, plus directional/omni/spot lights with soft shadows |
 | Scene | Built once, static | Instance transforms/visibility/lights tracked every frame, TLAS rebuilt on change |
+| Tracing | Software BVH only | Hardware RT pipeline (RT cores) when available, software BVH as fallback |
+| Motion | Accumulation reset on any change | Temporal reprojection with per-instance motion and history rejection |
+| Portals | — | `Portal3D` node: rays and the fly camera pass through linked portals |
 
-Measured on an RTX 4070 Ti SUPER (whole frame, including Godot's own raster pass and UI):
+Measured on an RTX 4070 Ti SUPER, GPU time of the whole viewport (including Godot's own raster
+pass and UI), from `capture.gd`:
 
-- Cornell demo, 1080p, 5 bounces, animated (1 spp/frame): **~9.5 ms**
-- Cornell demo, 720p, animated: **~4.4 ms**
-- Lights demo (5k tris, 3 punctual lights + emissive), 720p, static: **~2.4–5 ms**
+| Scene | Software (compute BVH) | Hardware (RT pipeline) |
+|---|---|---|
+| Cornell demo, 1080p, 5 bounces, animated, temporal on | 7.9 ms | 3.5 ms |
+| Cornell demo, 1152×648, animated | 3.1 ms | 1.3 ms (1.05 ms without temporal) |
+| Lights demo (5k tris, 3 punctual lights + emissive), 1080p, static | 3.0 ms | 2.0 ms |
+| Portal demo, 1152×648, static | 2.1 ms | 1.5 ms |
+
+Both backends converge to the same image (mean difference < 0.05/255 on the Cornell and lights
+demos).
 
 I did not benchmark the old build (it needed the old GDCS + godot-cpp 4.3 toolchain), so there is
 no exact before/after number. The old per-frame GPU→CPU→GPU round trip alone typically costs
@@ -53,13 +64,13 @@ the one assigned) and appends a `PathTracingEffect`. The effect runs at
 
 1. Takes a snapshot of the scene data published by `GeometryGroup3D` (mutex + versions, see
    `scene_data.h`) and re-uploads only what changed.
-2. Gets an `rgba32f` accumulation texture from `RenderSceneBuffersRD` (context
-   `jar_path_tracing`). It follows viewport resizes automatically.
+2. Gets ping-pong `rgba32f` history and G-buffer textures from `RenderSceneBuffersRD` (context
+   `jar_path_tracing`). They follow viewport resizes automatically.
 3. Builds the camera ray setup from `RenderSceneData::get_cam_transform()` and
    `get_cam_projection()`. That projection is reversed-Z and already contains Vulkan's y flip, so
    NDC y increases downwards in the shader.
-4. Dispatches `main.glsl` once (8×8 groups), which traces, accumulates (running mean) and writes
-   linear HDR radiance into the color buffer. Godot's tonemapping etc. happen afterwards, so the
+4. Dispatches `main.glsl` (8×8 groups) or traces rays with `main_hw.glsl`; both trace,
+   accumulate and write linear HDR radiance into the color buffer. Godot's tonemapping etc. happen afterwards, so the
    `WorldEnvironment` tonemap settings now control the look.
 
 Accumulation resets on camera, projection, settings, scene or resolution changes, or when
@@ -84,14 +95,24 @@ Things to know:
 
 ```
 shaders/
-  main.glsl        entry point: camera rays, integrator, NEE, accumulation
+  main.glsl        software entry point (compute): includes common, brdfs, trace_sw, integrator
+  main_hw.glsl     hardware entry point: #[raygen] (same includes with trace_hw), #[miss], #[closest_hit]
+  integrator.glsli camera rays, path tracing loop, NEE + MIS, portals, temporal accumulation
   common.glsli     structs/bindings (mirror of gpu_types.h + FrameData), RNG, helpers
   brdfs.glsli      Burley-ish diffuse + GGX (VNDF sampling), ShadingInfo
   trace_sw.glsli   software two-level BVH traversal: trace_closest() / trace_any()
+  trace_hw.glsli   the same two functions with traceRayEXT
+  hw_payload.glsli ray payload shared by the raygen/miss/closest-hit stages
 ```
 
-Includes use `.glsli` so Godot does not try to import them as standalone shaders. The hardware
-backend (phase 4) only needs to provide another `trace_*.glsli` with the same two functions.
+Includes use `.glsli` so Godot does not try to import them as standalone shaders. Two importer
+gotchas:
+
+- Godot's shader importer does not resolve nested `#include`s, so every include is listed in the
+  entry files (in order).
+- Godot only reimports `main.glsl`/`main_hw.glsl` when *those* files change, not when an included
+  `.glsli` changes. After editing an include, touch the entry file or delete
+  `.godot/imported/main*.glsl-*`; otherwise the old SPIR-V keeps running.
 
 ## Phase 2: lighting
 
@@ -135,11 +156,89 @@ surface; triangles were never cleared between builds; non-indexed meshes crashed
 `break` after `NOTIFICATION_READY`; temporal reprojection compared against the current frame's
 depth.
 
+## Phase 4: hardware ray tracing
+
+On this machine Godot 4.7.2 reports `SUPPORTS_RAY_QUERY = false` but
+`SUPPORTS_RAYTRACING_PIPELINE = true`, so the hardware path uses the ray tracing pipeline:
+
+- `main_hw.glsl` holds three stages. The raygen stage runs the same integrator as the compute
+  shader, with `trace_hw.glsli` providing `trace_closest()`/`trace_any()` via `traceRayEXT`.
+  Closest-hit only records `t`, barycentrics, `gl_InstanceCustomIndexEXT` and `gl_PrimitiveID`;
+  miss clears the hit flag. Shadow rays use `TerminateOnFirstHit | SkipClosestHitShader`.
+- One `RDPipelineShader` serves as raygen, miss and closest hit; one hit group; recursion depth 1.
+  A hit SBT with a single range is assigned to every TLAS instance.
+- BLAS per mesh from a triangle soup (`SceneSnapshot::blas_vertices`) in the same order as the
+  software triangle buffer, so `instance.triangle_offset + gl_PrimitiveID` indexes the shared
+  triangle/material data directly. Vertex buffers need
+  `BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT | DEVICE_ADDRESS_BIT`.
+- The TLAS is rebuilt when instances change (with spare capacity); instance custom index = our
+  instance index, flags `TRIANGLE_FACING_CULL_DISABLE | FORCE_OPAQUE`. An empty scene gets one
+  mask-0 instance so the TLAS stays valid.
+- Uniform sets are identical to the software path plus the TLAS at set 1 binding 10.
+- `PathTracingCamera.backend` = Auto / Software / Hardware; `get_active_backend()` reports what is
+  actually running. Auto prefers hardware. Hardware requested but unsupported warns once and
+  falls back to software.
+
+### Software traversal and the NVIDIA driver
+
+With separate 32-entry stacks for the TLAS and BLAS loops, the software shader sometimes lost the
+Vulkan device (`VkResult -4`) once the temporal code was added. It always happened on the same
+random path, at a frame that moved when unrelated code changed, even with every buffer index
+clamped and every loop bounded. That points at the driver's handling of the shader (local
+memory), not at an out-of-bounds access. Sharing one 32-entry stack between the TLAS and BLAS
+walks (BLAS entries are pushed above the pending TLAS entries) fixed it and uses half the local
+memory. If it ever comes back, smaller stacks or moving the temporal resolve into its own
+dispatch are the next things to try.
+
+## Temporal accumulation
+
+The image is a per-pixel running mean (`history.a` = sample count) that is reprojected instead of
+reset when the camera or objects move:
+
+- The G-buffer stores the primary hit's normal and its distance from the camera (−1 for sky).
+- The primary hit is mapped back to last frame's world position through the instance's previous
+  transform (`GpuInstance::prev_object_to_world`; `GeometryGroup3D` uploads once more after motion
+  stops so it catches up), then projected with last frame's view-projection. Sky pixels reproject
+  by direction only.
+- Bilinear taps are accepted when last frame's distance matches within 3% + 2 cm and the normals
+  agree (dot > 0.8); sky only matches sky. Rejected history restarts at one sample.
+- While anything moves, the history length is capped at `temporal_max_history` (16) so lighting
+  changes fade in; two frames after everything stops it accumulates without limit again (or up to
+  `max_samples`).
+- `temporal_reprojection = false` restores plain accumulation (reset on any change). Settings,
+  backend and resolution changes always reset.
+
+Not done: variance (neighbourhood) clamping against lag in indirect light, and a spatial filter.
+Light changes are only detected as "something changed" through the light buffer comparison.
+
+## Portals
+
+`Portal3D` (a `Node3D` under the `GeometryGroup3D`) is a rectangle of `size` in the local XY plane
+whose front faces +Z, with a `linked_portal` and a `tint`.
+
+- Rays that enter a portal's front closer than the nearest surface continue from the linked
+  portal. The teleport transform is `other.global * rotY(180°) * self.global⁻¹`, so walking into
+  the front of A exits the front of B. Up to `max_portal_hops` (8) crossings per segment; unlinked
+  portals and the hop limit end the path (black). Each crossing multiplies throughput by `tint`.
+- Portals are tested analytically in the integrator (a loop over all portals), not through the
+  BVH, so a handful of portals costs almost nothing and needs no geometry.
+- Next event estimation does not look through portals: a portal front blocks shadow rays, and
+  emission found through a portal by BSDF sampling gets full MIS weight. Light from the other side
+  therefore arrives only via BSDF-sampled paths (noisier, but unbiased).
+- Temporal reprojection uses the unfolded (virtual) hit point for pixels seen through a portal,
+  which is exact while the portals don't move.
+- `is_crossing(from, to)` and `get_teleport_transform()` are exposed for gameplay; the demo fly
+  camera uses them to walk through.
+- Place a portal about a centimetre in front of the wall it sits on; when coplanar, the wall and
+  the portal fight.
+
 ## Demo / testing
 
 - `demo/demo.tscn`: the Cornell box, with both Suzannes animated (`demo/animator.gd`).
 - `demo/lights_demo.tscn`: textured ground, sun + omni + spot, metal sphere, emissive lamp.
-- Keys: WASD/QE move, wheel = speed, Esc = mouse capture, Space = pause animation, Tab = debug view.
+- `demo/portal_demo.tscn`: two disconnected rooms linked by a portal pair; fly through it.
+- Keys: WASD/QE move, wheel = speed, Esc = mouse capture, Space = pause animation, Tab = debug
+  view, B = cycle backend, T = toggle temporal reprojection.
 - `demo/capture.gd` is a dev helper for scripted regression screenshots (opens a window):
 
 ```bash
@@ -147,12 +246,14 @@ Godot_v4.7.2-stable_win64_console.exe --path project --resolution 1280x720 -- --
 ```
 
   Extra flags: `--raster` (disable the path tracer for comparison), `--debug-view=N`, `--static`
-  (freeze animations so accumulation converges). It prints the average frame time.
+  (freeze animations so accumulation converges), `--backend=0|1|2` (auto/software/hardware),
+  `--no-temporal`, `--pan` (sway the camera), `--walk` (portal demo: walk through portal A). It
+  prints the average frame time and the viewport's GPU time.
 
 ## Known limitations / follow-ups
 
-- Noise: 1 spp + white-noise PCG. Blue noise / Sobol and a denoiser (phase 6) are the obvious
-  next steps. Moving anything resets accumulation; there is no temporal reuse yet.
+- Noise: 1 spp + white-noise PCG. Blue noise / Sobol and a spatial denoiser are the obvious next
+  steps; temporal reuse alone still looks grainy while things move.
 - Many emissive triangles: NEE picks one triangle per bounce. Fine for the demos; ReSTIR DI or a
   light BVH would be needed for scenes with thousands of emitters.
 - Textures are resized into one `texture_resolution`² array without mipmaps (no ray cones), so
@@ -163,17 +264,18 @@ Godot_v4.7.2-stable_win64_console.exe --path project --resolution 1280x720 -- --
   thousands, switch to binned SAH or refit.
 - The sky is a simple gradient set on the camera, not the `WorldEnvironment` sky.
 
-## Next phases (not started)
+- Hardware path: BLASes are rebuilt from scratch on every geometry change and the TLAS on every
+  instance change (no refit/update). If Godot/the driver ever report `SUPPORTS_RAY_QUERY`, ray
+  queries would allow one compute shader for both backends.
 
-4. **Hardware backend.** Godot 4.7 exposes `blas_create`/`tlas_create`,
-   `raytracing_pipeline_create`, hit SBTs and `raytracing_list_trace_rays`, behind
-   `RenderingDevice.has_feature(SUPPORTS_RAYTRACING_PIPELINE)`. Plan: raygen shader runs the
-   same integrator, closest-hit only returns (instance, primitive, barycentrics, t), miss returns
-   no-hit, shadow rays use `gl_RayFlagsTerminateOnFirstHitEXT`. BLAS per `MeshEntry`, TLAS
-   instances from the same `GpuInstance` data. Keep the compute path as the fallback.
-5. **Portals.** In the integrator: when a hit's material/instance is flagged as a portal, apply
-   `dst * inverse(src)` to the ray and continue without counting a bounce (cap at ~8 hops). NEE
-   through portals is the open question.
-6. **Denoising.** Temporal accumulation with motion vectors and history rejection, then SVGF-style
-   à-trous with albedo demodulation. Portal hits need to count as disocclusions.
-7. **Portal puzzle demo.**
+## Next steps
+
+1. **Spatial denoising.** SVGF-style à-trous on top of the temporal history, with albedo
+   demodulation and variance from history moments. The G-buffer already has normal + distance;
+   add albedo.
+2. **Variance clamping** in the temporal pass to reduce lag in indirect light.
+3. **Portal puzzle demo.** A player controller with collision that teleports via
+   `Portal3D.is_crossing()`, plus moving portals (needs previous-frame portal transforms for
+   reprojection).
+4. **NEE through portals** (for example, sampling lights in each portal's linked space) to cut the
+   noise of light that only reaches a room through a portal.

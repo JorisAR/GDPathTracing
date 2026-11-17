@@ -9,8 +9,9 @@
 #define DEBUG_ALBEDO 2u
 #define DEBUG_TRAVERSAL 3u
 
-#define FLAG_ACCUMULATE 1u
-#define FLAG_COPY_ONLY 2u
+#define FLAG_REPROJECT 1u // temporal reprojection of history (otherwise history is read at the same pixel)
+#define FLAG_COPY_ONLY 2u // just present the stored history
+#define FLAG_RESET 4u     // discard history
 
 #define TLAS_LEAF 0xFFFFFFFFu
 #define INSTANCE_FLAG_EMISSIVE 1u
@@ -61,8 +62,9 @@ struct Material {
 };
 
 struct Instance {
-    vec4 o2w[3]; // rows of the object -> world affine matrix
-    vec4 w2o[3]; // rows of the world -> object affine matrix
+    vec4 o2w[3];      // rows of the object -> world affine matrix
+    vec4 w2o[3];      // rows of the world -> object affine matrix
+    vec4 prev_o2w[3]; // object -> world of the previous frame (motion vectors)
     uint bvh_root;
     uint material_offset;
     uint triangle_offset;
@@ -89,17 +91,28 @@ struct PunctualLight {
     float pad;
 };
 
+struct Portal {
+    vec4 w2l[3];      // world -> portal local (portal plane is local z = 0, front faces +z)
+    vec4 teleport[3]; // world -> world transform applied to rays entering through the front
+    vec4 tint;        // rgb multiplier applied when passing through
+    vec2 half_size;
+    uint linked;      // 0 = no destination, behaves as a black surface
+    uint pad;
+};
+
 // ----------------------------------- BINDINGS -----------------------------------
 
 layout(set = 0, binding = 0, std140) uniform FrameData {
     mat4 cam_to_world;
     mat4 inv_projection;
+    mat4 prev_view_proj; // previous frame projection * view, for reprojection
+    vec4 prev_cam_pos;
     vec4 sky_top;     // rgb * energy
     vec4 sky_horizon; // rgb * energy
     vec4 ground;      // rgb * energy
     ivec2 size;
     uint frame_index;
-    uint sample_index;
+    uint history_cap; // max history length used for blending (1 = no accumulation)
     uint max_bounces;
     uint samples_per_pixel;
     uint instance_count;
@@ -109,13 +122,16 @@ layout(set = 0, binding = 0, std140) uniform FrameData {
     float firefly_clamp;
     uint debug_mode;
     uint flags;
+    uint portal_count;
+    uint max_portal_hops;
     uint pad0;
-    uint pad1;
-    uint pad2;
 } frame;
 
-layout(set = 0, binding = 1, rgba16f) uniform restrict image2D color_image;
-layout(set = 0, binding = 2, rgba32f) uniform restrict image2D accum_image;
+layout(set = 0, binding = 1, rgba16f) uniform restrict writeonly image2D color_image;
+layout(set = 0, binding = 2, rgba32f) uniform restrict writeonly image2D history_out; // rgb radiance, a history length
+layout(set = 0, binding = 3, rgba32f) uniform restrict readonly image2D history_in;
+layout(set = 0, binding = 4, rgba32f) uniform restrict writeonly image2D gbuffer_out; // xyz normal, w distance (-1 = sky)
+layout(set = 0, binding = 5, rgba32f) uniform restrict readonly image2D gbuffer_in;
 
 layout(set = 1, binding = 0, std430) restrict readonly buffer BVHNodes { BVHNode bvh_nodes[]; };
 layout(set = 1, binding = 1, std430) restrict readonly buffer Triangles { Triangle triangles[]; };
@@ -126,6 +142,7 @@ layout(set = 1, binding = 5, std430) restrict readonly buffer Instances { Instan
 layout(set = 1, binding = 6, std430) restrict readonly buffer TLASNodes { TLASNode tlas_nodes[]; };
 layout(set = 1, binding = 7, std430) restrict readonly buffer EmissiveTriangles { EmissiveTriangle emissive_triangles[]; };
 layout(set = 1, binding = 8, std430) restrict readonly buffer PunctualLights { PunctualLight punctual_lights[]; };
+layout(set = 1, binding = 9, std430) restrict readonly buffer Portals { Portal portals[]; };
 
 layout(set = 2, binding = 0) uniform sampler2DArray albedo_textures;
 

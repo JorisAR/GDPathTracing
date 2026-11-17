@@ -1,8 +1,7 @@
 // Software ray traversal (two-level BVH). A hardware backend only needs to provide the same
 // two functions: trace_closest() and trace_any().
 
-#define BLAS_STACK_SIZE 32
-#define TLAS_STACK_SIZE 32
+#define STACK_SIZE 32 // shared by TLAS and BLAS traversal
 
 // Slab test. Returns the entry distance, or INF on a miss / when the box lies beyond t_max.
 float intersect_aabb(const Ray r, const vec3 inv_d, const vec3 bmin, const vec3 bmax, const float t_max) {
@@ -38,56 +37,14 @@ bool intersect_triangle(const Ray r, const uint tri_index, inout Hit hit) {
     return true;
 }
 
-// Traverses one BLAS with an object space ray. Returns true if the hit was updated.
-bool intersect_blas(const Ray r, const uint root, const bool any_hit, inout Hit hit) {
-    vec3 inv_d = 1.0 / r.d;
-    uint stack[BLAS_STACK_SIZE];
-    uint sp = 0u;
-    bool found = false;
-
-    BVHNode node = bvh_nodes[root];
-    if (intersect_aabb(r, inv_d, node.aabb_min, node.aabb_max, hit.t) == INF) return false;
-
-    while (true) {
-        hit.steps++;
-        if (node.tri_count > 0u) {
-            for (uint i = 0u; i < node.tri_count; i++) {
-                if (intersect_triangle(r, node.left_first + i, hit)) {
-                    found = true;
-                    if (any_hit) return true;
-                }
-            }
-            if (sp == 0u) break;
-            node = bvh_nodes[stack[--sp]];
-            continue;
-        }
-
-        uint c1 = node.left_first;
-        uint c2 = c1 + 1u;
-        BVHNode n1 = bvh_nodes[c1];
-        BVHNode n2 = bvh_nodes[c2];
-        float d1 = intersect_aabb(r, inv_d, n1.aabb_min, n1.aabb_max, hit.t);
-        float d2 = intersect_aabb(r, inv_d, n2.aabb_min, n2.aabb_max, hit.t);
-        if (d1 > d2) {
-            float td = d1; d1 = d2; d2 = td;
-            uint tc = c1; c1 = c2; c2 = tc;
-            BVHNode tn = n1; n1 = n2; n2 = tn;
-        }
-        if (d1 == INF) {
-            if (sp == 0u) break;
-            node = bvh_nodes[stack[--sp]];
-        } else {
-            node = n1;
-            if (d2 != INF && sp < BLAS_STACK_SIZE) stack[sp++] = c2;
-        }
-    }
-    return found;
-}
-
+// Two-level traversal with one stack shared by the TLAS and the BLAS walks: BLAS entries are
+// pushed on top of the pending TLAS entries. Keeping a single small per-thread array matters:
+// with separate 32-entry stacks, the NVIDIA driver produced shaders that occasionally lost the
+// device (see docs/NOTES.md).
 bool trace_tlas(const Ray r, const bool any_hit, inout Hit hit) {
     if (frame.instance_count == 0u) return false;
     vec3 inv_d = 1.0 / r.d;
-    uint stack[TLAS_STACK_SIZE];
+    uint stack[STACK_SIZE];
     uint sp = 0u;
     bool found = false;
 
@@ -100,10 +57,49 @@ bool trace_tlas(const Ray r, const bool any_hit, inout Hit hit) {
             Ray local;
             local.o = xform_point(inst.w2o, r.o);
             local.d = xform_vector(inst.w2o, r.d); // not normalized: t stays comparable across instances
-            if (intersect_blas(local, inst.bvh_root, any_hit, hit)) {
+            vec3 local_inv_d = 1.0 / local.d;
+
+            const uint base = sp;
+            bool blas_found = false;
+            BVHNode bn = bvh_nodes[inst.bvh_root];
+            if (intersect_aabb(local, local_inv_d, bn.aabb_min, bn.aabb_max, hit.t) != INF) {
+                while (true) {
+                    hit.steps++;
+                    if (bn.tri_count > 0u) {
+                        for (uint i = 0u; i < bn.tri_count; i++) {
+                            if (intersect_triangle(local, bn.left_first + i, hit)) {
+                                blas_found = true;
+                                if (any_hit) return true;
+                            }
+                        }
+                        if (sp == base) break;
+                        bn = bvh_nodes[stack[--sp]];
+                        continue;
+                    }
+
+                    uint c1 = bn.left_first;
+                    uint c2 = c1 + 1u;
+                    BVHNode n1 = bvh_nodes[c1];
+                    BVHNode n2 = bvh_nodes[c2];
+                    float d1 = intersect_aabb(local, local_inv_d, n1.aabb_min, n1.aabb_max, hit.t);
+                    float d2 = intersect_aabb(local, local_inv_d, n2.aabb_min, n2.aabb_max, hit.t);
+                    if (d1 > d2) {
+                        float td = d1; d1 = d2; d2 = td;
+                        uint tc = c1; c1 = c2; c2 = tc;
+                        BVHNode tn = n1; n1 = n2; n2 = tn;
+                    }
+                    if (d1 == INF) {
+                        if (sp == base) break;
+                        bn = bvh_nodes[stack[--sp]];
+                    } else {
+                        bn = n1;
+                        if (d2 != INF && sp < STACK_SIZE) stack[sp++] = c2;
+                    }
+                }
+            }
+            if (blas_found) {
                 hit.instance = node.left;
                 found = true;
-                if (any_hit) return true;
             }
             if (sp == 0u) break;
             node = tlas_nodes[stack[--sp]];
@@ -126,7 +122,7 @@ bool trace_tlas(const Ray r, const bool any_hit, inout Hit hit) {
             node = tlas_nodes[stack[--sp]];
         } else {
             node = n1;
-            if (d2 != INF && sp < TLAS_STACK_SIZE) stack[sp++] = c2;
+            if (d2 != INF && sp < STACK_SIZE) stack[sp++] = c2;
         }
     }
     return found;

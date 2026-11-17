@@ -1,5 +1,6 @@
 #include "geometry_group3d.h"
 
+#include "path_tracing/portal3d.h"
 #include "rd/rd_util.h"
 
 #include <godot_cpp/classes/array_mesh.hpp>
@@ -152,6 +153,8 @@ void GeometryGroup3D::collect(std::vector<Node *> &mesh_nodes, std::vector<Node 
                 continue; // nested groups manage their own subtree
             if (Object::cast_to<MeshInstance3D>(child) != nullptr)
                 mesh_nodes.push_back(child);
+            else if (Object::cast_to<Portal3D>(child) != nullptr)
+                portal_nodes.push_back(ObjectID(child->get_instance_id()));
             else if (Object::cast_to<DirectionalLight3D>(child) != nullptr ||
                      Object::cast_to<OmniLight3D>(child) != nullptr || Object::cast_to<SpotLight3D>(child) != nullptr)
                 light_nodes_out.push_back(child);
@@ -309,11 +312,13 @@ void GeometryGroup3D::build()
     meshes.clear();
     instance_entries.clear();
     light_nodes.clear();
+    portal_nodes.clear();
     material_refs.clear();
     materials.clear();
     instance_materials.clear();
     texture_refs.clear();
     last_light_bytes = PackedByteArray();
+    last_portal_bytes = PackedByteArray();
 
     // Material 0 is the default material.
     Ref<BaseMaterial3D> def = default_material;
@@ -385,6 +390,25 @@ void GeometryGroup3D::build()
 
     total_triangles = static_cast<uint32_t>(gpu_tris.size());
 
+    // Triangle soup per mesh for hardware BLASes (same order as the triangle buffers).
+    std::vector<PackedByteArray> blas_vertices;
+    for (const MeshEntry &m : meshes)
+    {
+        std::vector<float> v;
+        v.reserve(m.tris.size() * 9);
+        for (const BuildTriangle &t : m.tris)
+        {
+            const Vector3 corners[3] = {t.v0, t.v1, t.v2};
+            for (const Vector3 &c : corners)
+            {
+                v.push_back(c.x);
+                v.push_back(c.y);
+                v.push_back(c.z);
+            }
+        }
+        blas_vertices.push_back(vector_to_bytes(v));
+    }
+
     // Textures: decompress, convert to RGBA8 and resize to a common resolution for the array.
     std::vector<Ref<Image>> images;
     for (const Ref<Texture2D> &tex : texture_refs)
@@ -427,6 +451,7 @@ void GeometryGroup3D::build()
         s.instance_materials = inst_mat_bytes;
         s.textures = images;
         s.texture_resolution = tex_res;
+        s.blas_vertices = blas_vertices;
     });
 
     built = true;
@@ -435,7 +460,7 @@ void GeometryGroup3D::build()
     UtilityFunctions::print("[PathTracing] built ", (int64_t)meshes.size(), " meshes, ", (int64_t)total_triangles,
                             " triangles, ", (int64_t)instance_entries.size(), " instances, ",
                             (int64_t)materials.size(), " materials, ", (int64_t)texture_refs.size(), " textures, ",
-                            (int64_t)light_nodes.size(), " lights");
+                            (int64_t)light_nodes.size(), " lights, ", (int64_t)portal_nodes.size(), " portals");
 }
 
 // ----------------------------------- PER FRAME -----------------------------------
@@ -491,30 +516,64 @@ PackedByteArray GeometryGroup3D::build_light_buffer(uint32_t &count)
     return vector_to_bytes(lights);
 }
 
+PackedByteArray GeometryGroup3D::build_portal_buffer(uint32_t &count)
+{
+    std::vector<GpuPortal> out;
+    for (const ObjectID &id : portal_nodes)
+    {
+        Portal3D *portal = Object::cast_to<Portal3D>(ObjectDB::get_instance(id));
+        if (portal == nullptr || !portal->is_visible_in_tree())
+            continue;
+        GpuPortal g{};
+        write_rows(g.world_to_local, portal->get_global_transform().affine_inverse());
+        Portal3D *other = portal->get_linked_portal();
+        g.linked = other != nullptr && other->is_inside_tree() ? 1u : 0u;
+        write_rows(g.teleport, portal->get_teleport_transform());
+        Color tint = portal->get_tint().srgb_to_linear();
+        g.tint[0] = tint.r;
+        g.tint[1] = tint.g;
+        g.tint[2] = tint.b;
+        g.tint[3] = 1.0f;
+        g.half_size[0] = portal->get_size().x * 0.5f;
+        g.half_size[1] = portal->get_size().y * 0.5f;
+        out.push_back(g);
+    }
+    count = static_cast<uint32_t>(out.size());
+    return vector_to_bytes(out);
+}
+
 void GeometryGroup3D::update_dynamic(bool force)
 {
     if (!built)
         return;
 
-    bool instances_changed = force;
+    bool moved = false;
     for (InstanceEntry &inst : instance_entries)
     {
         MeshInstance3D *mi = Object::cast_to<MeshInstance3D>(ObjectDB::get_instance(inst.node));
         bool visible = mi != nullptr && mi->is_visible_in_tree();
         Transform3D xf = visible ? mi->get_global_transform() : inst.transform;
+        inst.prev_transform = inst.transform; // last frame's transform, for motion vectors
         if (visible != inst.visible || (visible && xf != inst.transform))
         {
-            instances_changed = true;
+            moved = true;
             inst.visible = visible;
             inst.transform = xf;
         }
     }
+    // After motion stops, upload once more so the previous transforms catch up (zero motion).
+    bool instances_changed = force || moved || moved_last_update;
+    moved_last_update = moved;
 
     uint32_t light_count = 0;
     PackedByteArray light_bytes = build_light_buffer(light_count);
     bool lights_changed = force || light_bytes != last_light_bytes;
 
-    if (!instances_changed && !lights_changed)
+    uint32_t portal_count = 0;
+    PackedByteArray portal_bytes = build_portal_buffer(portal_count);
+    bool portals_changed = force || portal_bytes != last_portal_bytes;
+
+    if (!instances_changed && !lights_changed && !portals_changed)
         return;
 
     PackedByteArray instance_bytes, tlas_bytes, emissive_bytes;
@@ -523,6 +582,7 @@ void GeometryGroup3D::update_dynamic(bool force)
     float total_power = 0.0f;
     bool update_instances = instances_changed;
 
+    std::vector<HwInstance> hw_instances;
     if (update_instances)
     {
         std::vector<GpuInstance> gpu_instances(instance_entries.size());
@@ -537,6 +597,7 @@ void GeometryGroup3D::update_dynamic(bool force)
             GpuInstance &g = gpu_instances[i];
             write_rows(g.object_to_world, inst.transform);
             write_rows(g.world_to_object, inst.transform.affine_inverse());
+            write_rows(g.prev_object_to_world, inst.prev_transform);
             g.bvh_root = mesh.bvh_root;
             g.material_offset = inst.material_offset;
             g.triangle_offset = mesh.triangle_offset;
@@ -546,6 +607,7 @@ void GeometryGroup3D::update_dynamic(bool force)
                 continue;
             bounds.push_back(inst.transform.xform(mesh.local_bounds));
             ids.push_back(static_cast<uint32_t>(i));
+            hw_instances.push_back({inst.transform, inst.mesh, static_cast<uint32_t>(i)});
 
             if (inst.emissive)
             {
@@ -585,10 +647,14 @@ void GeometryGroup3D::update_dynamic(bool force)
     }
 
     last_light_bytes = light_bytes;
+    last_portal_bytes = portal_bytes;
     scene_data->modify([&](SceneSnapshot &s) {
         s.instance_version++;
+        s.portals = portal_bytes;
+        s.portal_count = portal_count;
         if (update_instances)
         {
+            s.hw_instances = hw_instances;
             s.instances = instance_bytes;
             s.tlas_nodes = tlas_bytes;
             s.emissive_triangles = emissive_bytes;

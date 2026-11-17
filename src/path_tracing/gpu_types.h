@@ -84,12 +84,13 @@ struct GpuInstance
 {
     float object_to_world[12];
     float world_to_object[12];
+    float prev_object_to_world[12]; // previous frame, for motion vectors
     uint32_t bvh_root;        // index of the BLAS root node
     uint32_t material_offset; // offset into the instance material table
     uint32_t triangle_offset; // offset of the mesh's first triangle (for light lookups)
     uint32_t flags;
 };
-static_assert(sizeof(GpuInstance) == 112, "GpuInstance must be 112 bytes");
+static_assert(sizeof(GpuInstance) == 160, "GpuInstance must be 160 bytes");
 
 // Emissive triangle used for next event estimation. Selected proportional to power with a CDF.
 struct GpuEmissiveTriangle
@@ -122,6 +123,18 @@ struct GpuPunctualLight
     float pad;
 };
 static_assert(sizeof(GpuPunctualLight) == 64, "GpuPunctualLight must be 64 bytes");
+
+// Portal rectangle (local z = 0 plane, |x| <= half_size.x, |y| <= half_size.y, front faces +z).
+struct GpuPortal
+{
+    float world_to_local[12];
+    float teleport[12]; // world -> world for rays entering through the front
+    float tint[4];
+    float half_size[2];
+    uint32_t linked;
+    uint32_t pad;
+};
+static_assert(sizeof(GpuPortal) == 128, "GpuPortal must be 128 bytes");
 
 } // namespace PT
 

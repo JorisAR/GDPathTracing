@@ -1,0 +1,8 @@
+// Ray payload shared by the hardware raygen, miss and closest-hit stages.
+struct HwPayload {
+    float t;
+    vec2 bary;
+    uint instance;
+    uint primitive;
+    uint hit;
+};

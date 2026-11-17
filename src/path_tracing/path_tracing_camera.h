@@ -17,6 +17,13 @@ class PathTracingCamera : public Camera3D
     GDCLASS(PathTracingCamera, Camera3D);
 
   public:
+    enum Backend
+    {
+        BACKEND_AUTO = 0,
+        BACKEND_SOFTWARE = 1,
+        BACKEND_HARDWARE = 2,
+    };
+
     enum DebugView
     {
         DEBUG_NONE = 0,
@@ -58,6 +65,16 @@ class PathTracingCamera : public Camera3D
     float get_sky_energy() const;
     void set_sky_energy(float value);
 
+    Backend get_backend() const;
+    void set_backend(Backend value);
+    bool get_temporal_reprojection() const;
+    void set_temporal_reprojection(bool value);
+    int get_temporal_max_history() const;
+    void set_temporal_max_history(int value);
+    int get_max_portal_hops() const;
+    void set_max_portal_hops(int value);
+    String get_active_backend() const;
+
     int get_sample_count() const;
     void reset_accumulation();
 
@@ -72,5 +89,6 @@ class PathTracingCamera : public Camera3D
 };
 
 VARIANT_ENUM_CAST(PathTracingCamera::DebugView);
+VARIANT_ENUM_CAST(PathTracingCamera::Backend);
 
 #endif // PATH_TRACING_CAMERA_H
