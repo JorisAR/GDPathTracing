@@ -11,10 +11,10 @@ func _process(delta: float) -> void:
 	var lines := PackedStringArray()
 	lines.append("%d fps (%.2f ms)" % [Engine.get_frames_per_second(), delta * 1000.0])
 	if camera:
-		lines.append("%s  |  view: %s  |  samples: %d  |  bounces: %d" % [camera.get_active_backend(), DEBUG_NAMES[camera.debug_view], camera.get_sample_count(), camera.max_bounces])
+		lines.append("%s  |  view: %s  |  samples: %d  |  bounces: %d  |  temporal: %s  |  denoise: %s" % [camera.get_active_backend(), DEBUG_NAMES[camera.debug_view], camera.get_sample_count(), camera.max_bounces, "on" if camera.temporal_reprojection else "off", "on" if camera.denoise else "off"])
 	if geometry_group:
 		lines.append("%d triangles, %d instances, %d emissive triangles" % [geometry_group.get_triangle_count(), geometry_group.get_instance_count(), geometry_group.get_emissive_triangle_count()])
-	lines.append("WASD/QE move, Esc mouse, Space pause animation, Tab debug view, B backend, T temporal")
+	lines.append("WASD/QE move, Esc mouse, Space pause animation, Tab debug view, B backend, T temporal, N denoise")
 	text = "\n".join(lines)
 
 
@@ -27,3 +27,5 @@ func _input(event: InputEvent) -> void:
 			camera.backend = (camera.backend + 1) % 3
 		elif event.physical_keycode == KEY_T:
 			camera.temporal_reprojection = not camera.temporal_reprojection
+		elif event.physical_keycode == KEY_N:
+			camera.denoise = not camera.denoise

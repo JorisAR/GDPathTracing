@@ -119,7 +119,12 @@ int GeometryGroup3D::get_emissive_triangle_count() const
 void GeometryGroup3D::_notification(int p_what)
 {
     if (Engine::get_singleton()->is_editor_hint())
+    {
+        // In the editor the group only does work while a PathTracingCamera previews it.
+        if (p_what == NOTIFICATION_INTERNAL_PROCESS && built && editor_preview_users > 0)
+            update_dynamic(false);
         return;
+    }
 
     switch (p_what)
     {
@@ -161,6 +166,24 @@ void GeometryGroup3D::collect(std::vector<Node *> &mesh_nodes, std::vector<Node 
             queue.push_back(child);
         }
     }
+}
+
+void GeometryGroup3D::begin_editor_preview()
+{
+    if (editor_preview_users++ == 0)
+    {
+        set_process_priority(1000);
+        set_process_internal(true);
+    }
+    if (!built)
+        build();
+}
+
+void GeometryGroup3D::end_editor_preview()
+{
+    editor_preview_users = MAX(editor_preview_users - 1, 0);
+    if (editor_preview_users == 0)
+        set_process_internal(false);
 }
 
 int GeometryGroup3D::get_texture_index(const Ref<Texture2D> &texture)

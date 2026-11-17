@@ -13,7 +13,9 @@ This project aims to add a basic Pathtracer to godot using compute shaders. It's
 - **Lighting:** next event estimation with multiple importance sampling for emissive materials, plus `DirectionalLight3D`, `OmniLight3D` and `SpotLight3D` with soft shadows.
 - **Materials:** `StandardMaterial3D`/`ORMMaterial3D` are converted automatically: albedo color and texture (with UV scale/offset), metallic, roughness, emission.
 - **Temporal accumulation:** samples are reprojected across frames when the camera or objects move, and accumulate without limit when everything is still. Debug views show normals, albedo and BVH traversal cost.
-- **Portals:** `Portal3D` nodes link two rectangles in space; rays (and the demo camera) pass through.
+- **Denoising:** an edge-aware spatial filter (SVGF-style, with albedo demodulation) cleans up the image while things move; static views still converge to the exact result.
+- **Portals:** `Portal3D` nodes link two rectangles in space; rays (and the demo camera) pass through, including recursive views of the same room.
+- **Editor preview:** tick `editor_preview` on the camera to path trace the editor's 3D viewport.
 
 Requires **Godot 4.7** and the Forward+ renderer.
 
@@ -32,11 +34,11 @@ scons target=template_debug -j16
 
 1. Put your scene's meshes and lights under a `GeometryGroup3D` node.
 2. Use a `PathTracingCamera` (a `Camera3D`) and point its `geometry_group` at the group.
-3. Run the scene. See `project/demo/demo.tscn`, `project/demo/lights_demo.tscn` and `project/demo/portal_demo.tscn`.
+3. Run the scene, or tick the camera's `editor_preview` to see it in the editor. See `project/demo/demo.tscn`, `project/demo/lights_demo.tscn` and `project/demo/portal_demo.tscn`.
 
 Disable TAA/FSR on the viewport. To change meshes or materials at runtime, call `GeometryGroup3D.build()`; moving and hiding instances needs nothing.
 
-Implementation notes, measurements, limitations and the roadmap (denoising, a portal puzzle demo) are in [docs/NOTES.md](docs/NOTES.md).
+Implementation notes, measurements, limitations and the roadmap (a portal puzzle game, NEE through portals) are in [docs/NOTES.md](docs/NOTES.md).
 
 ## Contributing
 

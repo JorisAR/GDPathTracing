@@ -272,6 +272,7 @@ struct Primary {
     float distance;     // distance along the (virtual, unfolded) camera ray; -1 for sky
     vec3 prev_position; // where this point was last frame, in world space
     bool has_prev;      // false for sky (reproject by direction instead)
+    vec3 albedo;        // reflectance at the first hit (times portal tints), 1 for sky; for demodulation
 };
 
 vec3 clamp_contribution(vec3 c, uint depth) {
@@ -293,6 +294,7 @@ vec3 path_trace(Ray ray, inout uint rng, out Primary primary) {
     primary.distance = -1.0;
     primary.prev_position = vec3(0.0);
     primary.has_prev = false;
+    primary.albedo = vec3(1.0);
 
     for (uint depth = 0u; depth <= frame.max_bounces; depth++) {
         SceneHit sh = trace_scene(ray, throughput);
@@ -316,6 +318,7 @@ vec3 path_trace(Ray ray, inout uint rng, out Primary primary) {
         if (depth == 0u) {
             primary.normal = s.normal;
             primary.has_prev = true;
+            primary.albedo = (s.diffuse_albedo + s.fresnel_0) * throughput;
             if (sh.crossed_portal) {
                 // Seen through a portal: reproject the unfolded point (exact for static portals).
                 primary.prev_position = camera_pos + camera_dir * sh.distance;
@@ -376,6 +379,7 @@ vec3 debug_view(Ray ray, out Primary primary) {
     primary.normal = -camera_dir;
     primary.prev_position = camera_pos + camera_dir * sh.distance;
     primary.has_prev = primary.hit;
+    primary.albedo = vec3(1.0);
     if (frame.debug_mode == DEBUG_TRAVERSAL) {
         float x = clamp(float(sh.hit.steps) / 128.0, 0.0, 1.0);
         return vec3(x, x * x, 1.0 - x) * x;
@@ -399,18 +403,17 @@ Ray camera_ray(vec2 pixel) {
     return r;
 }
 
-// ----------------------------------- TEMPORAL -----------------------------------
+// ----------------------------------- ENTRY -----------------------------------
 
-// Fetches history for `pos`, either at the same pixel or reprojected with validation.
-// Returns rgb + history length in a (0 when rejected).
-vec4 fetch_history(ivec2 pos, const Primary primary, const vec3 view_dir) {
-    if ((frame.flags & FLAG_RESET) != 0u) return vec4(0.0);
-    if ((frame.flags & FLAG_REPROJECT) == 0u) return imageLoad(history_in, pos);
-
-    // Where was this point on screen last frame?
+// Where this pixel's primary hit (or, for the sky, the view direction) was on screen last frame,
+// as a pixel coordinate (pixel centres at integers). The sample was taken at `pixel` (jittered);
+// its screen motion is applied to the pixel centre, so a static view reprojects to exactly the
+// same pixel instead of resampling (and slowly blurring) the history every frame.
+vec4 compute_motion(const Primary primary, const vec3 view_dir, const vec2 pixel) {
     vec4 clip;
     float expected = -1.0;
-    if (primary.hit && primary.has_prev) {
+    if (primary.hit) {
+        if (!primary.has_prev) return vec4(0.0);
         clip = frame.prev_view_proj * vec4(primary.prev_position, 1.0);
         expected = length(primary.prev_position - frame.prev_cam_pos.xyz);
     } else {
@@ -418,55 +421,33 @@ vec4 fetch_history(ivec2 pos, const Primary primary, const vec3 view_dir) {
     }
     if (clip.w <= 1e-6) return vec4(0.0);
     vec2 ndc = clip.xy / clip.w;
-    vec2 p = (ndc * 0.5 + 0.5) * vec2(frame.size) - 0.5;
-    // Off-screen (or NaN): no history. Also keeps the float -> int conversion below in range.
+    vec2 prev_pixel = (ndc * 0.5 + 0.5) * vec2(frame.size); // same convention as `pixel`
+    vec2 p = floor(pixel) + (prev_pixel - pixel); // pixel corner + motion
     if (!(all(greaterThan(p, vec2(-1.0))) && all(lessThan(p, vec2(frame.size))))) return vec4(0.0);
-    ivec2 base = ivec2(floor(p));
-    vec2 f = p - vec2(base);
-
-    vec4 sum = vec4(0.0);
-    float weight_sum = 0.0;
-    for (int i = 0; i < 4; i++) {
-        ivec2 tap = base + ivec2(i & 1, i >> 1);
-        if (any(lessThan(tap, ivec2(0))) || any(greaterThanEqual(tap, frame.size))) continue;
-        float w = ((i & 1) == 1 ? f.x : 1.0 - f.x) * ((i >> 1) == 1 ? f.y : 1.0 - f.y);
-        vec4 g = imageLoad(gbuffer_in, tap);
-        bool valid;
-        if (expected < 0.0) {
-            valid = g.w < 0.0;
-        } else {
-            valid = g.w >= 0.0 && abs(g.w - expected) < 0.03 * expected + 0.02 && dot(g.xyz, primary.normal) > 0.8;
-        }
-        if (!valid) continue;
-        sum += imageLoad(history_in, tap) * w;
-        weight_sum += w;
-    }
-    if (weight_sum < 0.05) return vec4(0.0);
-    return sum / weight_sum;
+    return vec4(p, expected, 1.0);
 }
 
 void pt_main() {
     ivec2 pos = ivec2(PIXEL_ID);
     if (pos.x >= frame.size.x || pos.y >= frame.size.y) return;
 
-    if ((frame.flags & FLAG_COPY_ONLY) != 0u) {
-        vec4 h = imageLoad(history_in, pos);
-        imageStore(color_image, pos, vec4(h.rgb, 1.0));
-        return;
-    }
-
     uint rng = pcg_hash(uint(pos.x) + pcg_hash(uint(pos.y) + pcg_hash(frame.frame_index)));
 
     vec3 color = vec3(0.0);
     Primary primary;
     vec3 view_dir = vec3(0.0, 0.0, -1.0);
+    vec2 first_pixel = vec2(pos) + 0.5;
     uint spp = max(frame.samples_per_pixel, 1u);
     for (uint i = 0u; i < spp; i++) {
         Primary p;
         vec3 c;
         if (frame.debug_mode == DEBUG_NONE) {
-            Ray ray = camera_ray(vec2(pos) + rand2(rng));
-            if (i == 0u) view_dir = ray.d;
+            vec2 pixel = vec2(pos) + rand2(rng);
+            Ray ray = camera_ray(pixel);
+            if (i == 0u) {
+                view_dir = ray.d;
+                first_pixel = pixel;
+            }
             c = path_trace(ray, rng, p);
         } else {
             Ray ray = camera_ray(vec2(pos) + 0.5);
@@ -479,11 +460,8 @@ void pt_main() {
     }
     color /= float(spp);
 
-    vec4 history = fetch_history(pos, primary, view_dir);
-    float n = min(history.a + 1.0, float(max(frame.history_cap, 1u)));
-    vec3 result = mix(history.rgb, color, 1.0 / n);
-
-    imageStore(history_out, pos, vec4(result, n));
+    imageStore(frame_color, pos, vec4(color, 1.0));
+    imageStore(frame_motion, pos, compute_motion(primary, view_dir, first_pixel));
+    imageStore(frame_albedo, pos, vec4(primary.albedo, 1.0));
     imageStore(gbuffer_out, pos, vec4(primary.normal, primary.hit ? primary.distance : -1.0));
-    imageStore(color_image, pos, vec4(result, 1.0));
 }

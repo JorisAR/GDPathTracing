@@ -31,6 +31,17 @@ func _ready() -> void:
 			var cam := get_viewport().get_camera_3d()
 			if cam and "backend" in cam:
 				cam.backend = int(arg.trim_prefix("--backend="))
+		elif arg.begins_with("--camera="):
+			# --camera=x,y,z,yaw,pitch (degrees): place the camera for a screenshot.
+			var v := arg.trim_prefix("--camera=").split_floats(",")
+			var cam := get_viewport().get_camera_3d()
+			if cam and v.size() == 5:
+				cam.global_position = Vector3(v[0], v[1], v[2])
+				cam.rotation_degrees = Vector3(v[4], v[3], 0)
+		elif arg == "--no-denoise":
+			var cam := get_viewport().get_camera_3d()
+			if cam and "denoise" in cam:
+				cam.denoise = false
 		elif arg == "--no-temporal":
 			var cam := get_viewport().get_camera_3d()
 			if cam and "temporal_reprojection" in cam:
@@ -49,6 +60,10 @@ func _ready() -> void:
 	if _path.is_empty():
 		queue_free()
 		return
+	# Scripted runs: ignore the real mouse so it cannot turn the camera mid-capture.
+	var capture_cam := get_viewport().get_camera_3d()
+	if capture_cam and capture_cam.has_method("set_mouse"):
+		capture_cam.call_deferred("set_mouse", false)
 	RenderingServer.viewport_set_measure_render_time(get_viewport().get_viewport_rid(), true)
 
 

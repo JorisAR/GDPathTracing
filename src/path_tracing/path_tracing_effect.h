@@ -7,6 +7,7 @@
 #include <godot_cpp/classes/compositor_effect.hpp>
 #include <godot_cpp/classes/rd_shader_file.hpp>
 #include <godot_cpp/classes/render_data.hpp>
+#include <godot_cpp/classes/render_scene_buffers_rd.hpp>
 #include <godot_cpp/classes/rendering_device.hpp>
 #include <godot_cpp/variant/color.hpp>
 #include <godot_cpp/variant/projection.hpp>
@@ -38,6 +39,8 @@ struct RenderSettings
     int temporal_max_history = 16;
     int max_samples = 0; // 0 = unlimited
     int max_portal_hops = 8;
+    bool denoise = true;
+    int denoise_iterations = 4; // a-trous passes; the filter footprint is 2^(n+1)+1 pixels
     Color sky_top = Color(0.35f, 0.55f, 0.9f);
     Color sky_horizon = Color(0.85f, 0.9f, 1.0f);
     Color ground = Color(0.3f, 0.28f, 0.25f);
@@ -68,7 +71,7 @@ struct FrameData
     float ground[4];
     int32_t size[2];
     uint32_t frame_index;
-    uint32_t history_cap;
+    uint32_t pad1;
     uint32_t max_bounces;
     uint32_t samples_per_pixel;
     uint32_t instance_count;
@@ -88,7 +91,8 @@ static_assert(sizeof(FrameData) == 320, "FrameData must match the std140 layout"
 
 // Renders the path traced image straight into the scene's HDR color buffer on Godot's main
 // RenderingDevice. Uses the hardware ray tracing pipeline when available (and allowed),
-// otherwise the software BVH in a compute shader. Godot's tonemapper, exposure, glow etc. are applied afterwards as usual.
+// otherwise the software BVH in a compute shader. Per frame: trace (one path per pixel), then
+// the temporal resolve (resolve.glsl), then optionally the spatial denoiser (denoise.glsl). Godot's tonemapper, exposure, glow etc. are applied afterwards as usual.
 class PathTracingEffect : public CompositorEffect
 {
     GDCLASS(PathTracingEffect, CompositorEffect);
@@ -103,7 +107,8 @@ class PathTracingEffect : public CompositorEffect
     void _render_callback(int32_t p_effect_callback_type, RenderData *p_render_data) override;
 
     // Main thread API.
-    void set_shader_files(const Ref<RDShaderFile> &software, const Ref<RDShaderFile> &hardware);
+    void set_shader_files(const Ref<RDShaderFile> &software, const Ref<RDShaderFile> &hardware,
+                          const Ref<RDShaderFile> &resolver, const Ref<RDShaderFile> &denoiser);
     void set_scene(const PT::SceneDataPtr &scene);
     void set_settings(const PT::RenderSettings &settings);
     void reset_accumulation();
@@ -130,11 +135,19 @@ class PathTracingEffect : public CompositorEffect
                                    bool instances_changed);
     void free_hardware_structures(RenderingDevice *rd);
     void free_resources();
+    void trace(RenderingDevice *rd, const Pipeline &pipe, bool use_hardware, const Vector2i &size, RID frame_color,
+               RID frame_motion, RID frame_albedo, RID gbuffer);
+    void dispatch_compute(RenderingDevice *rd, const Pipeline &p, const TypedArray<RDUniform> &uniforms,
+                          const PackedByteArray &push_constant, const Vector2i &size);
+    void run_denoiser(RenderingDevice *rd, const Ref<RenderSceneBuffersRD> &buffers, const Vector2i &size,
+                      uint32_t source_slot, int iterations);
 
     // Shared between threads, guarded by `mutex`.
     std::mutex mutex;
     Ref<RDShaderFile> software_file;
     Ref<RDShaderFile> hardware_file;
+    Ref<RDShaderFile> resolve_file;
+    Ref<RDShaderFile> denoise_file;
     PT::SceneDataPtr scene;
     PT::RenderSettings settings;
     std::atomic<bool> reset_requested{false};
@@ -145,6 +158,8 @@ class PathTracingEffect : public CompositorEffect
     RenderingDevice *device = nullptr;
     Pipeline software;
     Pipeline hardware;
+    Pipeline resolver;
+    Pipeline denoiser;
     RID sampler;
     RID texture_array;
 
@@ -172,6 +187,7 @@ class PathTracingEffect : public CompositorEffect
     // Accumulation / temporal state.
     RID history_textures[2];
     RID gbuffer_textures[2];
+    RID aux_textures[2];
     uint32_t parity = 0;
     uint32_t frame_index = 0;
     uint32_t frames_since_change = 0;

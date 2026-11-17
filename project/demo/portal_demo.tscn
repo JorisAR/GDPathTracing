@@ -1,199 +1,436 @@
 [gd_scene format=3]
 
-[ext_resource type="Script" path="res://demo/movable_camera.gd" id="1_cam"]
-[ext_resource type="Script" path="res://demo/fps_meter.gd" id="2_fps"]
-[ext_resource type="Script" path="res://demo/animator.gd" id="3_anim"]
-[ext_resource type="Script" path="res://demo/capture.gd" id="4_capt"]
-[ext_resource type="Texture2D" path="res://demo/materials/grass_wales_diffuse.png" id="5_grass"]
-[ext_resource type="ArrayMesh" path="res://demo/geometry/suzanne.obj" id="6_suz"]
+[ext_resource type="Script" path="res://demo/movable_camera.gd" id="script_cam"]
+[ext_resource type="Script" path="res://demo/fps_meter.gd" id="script_fps"]
+[ext_resource type="Script" path="res://demo/animator.gd" id="script_anim"]
+[ext_resource type="Script" path="res://demo/capture.gd" id="script_capture"]
+[ext_resource type="Texture2D" path="res://demo/materials/grass_wales_diffuse.png" id="tex_grass"]
+[ext_resource type="Texture2D" path="res://demo/materials/checker.png" id="tex_checker"]
+[ext_resource type="ArrayMesh" path="res://demo/geometry/suzanne.obj" id="mesh_suzanne"]
 
 [sub_resource type="Environment" id="Environment_1"]
 background_mode = 1
-background_color = Color(0.05, 0.05, 0.06, 1)
+background_color = Color(0.5, 0.65, 0.9, 1)
 tonemap_mode = 3
 
-[sub_resource type="StandardMaterial3D" id="Mat_white"]
-albedo_color = Color(0.85, 0.82, 0.78, 1)
-roughness = 0.8
+[sub_resource type="StandardMaterial3D" id="Mat_wall"]
+albedo_color = Color(0.82, 0.8, 0.76, 1)
+roughness = 0.85
+
+[sub_resource type="StandardMaterial3D" id="Mat_checker"]
+albedo_texture = ExtResource("tex_checker")
+uv1_scale = Vector3(3, 3, 3)
+roughness = 0.6
+
+[sub_resource type="StandardMaterial3D" id="Mat_accent"]
+albedo_color = Color(0.25, 0.4, 0.75, 1)
+roughness = 0.7
 
 [sub_resource type="StandardMaterial3D" id="Mat_orange"]
 albedo_color = Color(0.9, 0.42, 0.15, 1)
-roughness = 0.6
-
-[sub_resource type="StandardMaterial3D" id="Mat_blue"]
-albedo_color = Color(0.25, 0.45, 0.85, 1)
-roughness = 0.7
-
-[sub_resource type="StandardMaterial3D" id="Mat_teal"]
-albedo_color = Color(0.2, 0.7, 0.6, 1)
-roughness = 0.7
-
-[sub_resource type="StandardMaterial3D" id="Mat_grass"]
-albedo_texture = ExtResource("5_grass")
-uv1_scale = Vector3(3, 3, 3)
+roughness = 0.5
 
 [sub_resource type="StandardMaterial3D" id="Mat_gold"]
 albedo_color = Color(1, 0.78, 0.35, 1)
 metallic = 1.0
 roughness = 0.25
 
-[sub_resource type="StandardMaterial3D" id="Mat_light_warm"]
+[sub_resource type="StandardMaterial3D" id="Mat_chrome"]
+albedo_color = Color(0.9, 0.9, 0.92, 1)
+metallic = 1.0
+roughness = 0.08
+
+[sub_resource type="StandardMaterial3D" id="Mat_grass"]
+albedo_texture = ExtResource("tex_grass")
+uv1_scale = Vector3(10, 10, 10)
+
+[sub_resource type="StandardMaterial3D" id="Mat_stone"]
+albedo_color = Color(0.55, 0.53, 0.5, 1)
+roughness = 0.9
+
+[sub_resource type="StandardMaterial3D" id="Mat_red"]
+albedo_color = Color(0.75, 0.12, 0.1, 1)
+roughness = 0.6
+
+[sub_resource type="StandardMaterial3D" id="Mat_light"]
 albedo_color = Color(0.1, 0.1, 0.1, 1)
 emission_enabled = true
-emission = Color(1, 0.85, 0.65, 1)
-emission_energy_multiplier = 8.0
+emission = Color(1, 0.9, 0.75, 1)
+emission_energy_multiplier = 7.0
 
-[sub_resource type="StandardMaterial3D" id="Mat_light_cool"]
+[sub_resource type="StandardMaterial3D" id="Mat_frame_violet"]
 albedo_color = Color(0.1, 0.1, 0.1, 1)
 emission_enabled = true
-emission = Color(0.65, 0.8, 1, 1)
-emission_energy_multiplier = 8.0
+emission = Color(0.65, 0.35, 1, 1)
+emission_energy_multiplier = 2.5
 
-[sub_resource type="BoxMesh" id="Mesh_floor"]
-size = Vector3(6.4, 0.2, 6.4)
+[sub_resource type="StandardMaterial3D" id="Mat_frame_gold"]
+albedo_color = Color(0.1, 0.1, 0.1, 1)
+emission_enabled = true
+emission = Color(1, 0.7, 0.25, 1)
+emission_energy_multiplier = 2.5
 
-[sub_resource type="BoxMesh" id="Mesh_wall_x"]
-size = Vector3(0.2, 3.4, 6)
+[sub_resource type="StandardMaterial3D" id="Mat_frame_white"]
+albedo_color = Color(0.9, 0.9, 0.9, 1)
+roughness = 0.4
 
-[sub_resource type="BoxMesh" id="Mesh_wall_z"]
-size = Vector3(6.4, 3.4, 0.2)
+[sub_resource type="BoxMesh" id="Box_0"]
+size = Vector3(12.4, 0.2, 12.4)
 
-[sub_resource type="BoxMesh" id="Mesh_panel"]
+[sub_resource type="BoxMesh" id="Box_1"]
+size = Vector3(0.2, 4.4, 12)
+
+[sub_resource type="BoxMesh" id="Box_2"]
+size = Vector3(12.4, 4.4, 0.2)
+
+[sub_resource type="BoxMesh" id="Box_3"]
 size = Vector3(1.6, 0.04, 1.6)
 
-[sub_resource type="BoxMesh" id="Mesh_box"]
+[sub_resource type="BoxMesh" id="Box_4"]
+size = Vector3(0.7, 1, 0.7)
+
+[sub_resource type="BoxMesh" id="Box_5"]
 size = Vector3(0.8, 0.8, 0.8)
 
-[sub_resource type="BoxMesh" id="Mesh_pedestal"]
-size = Vector3(0.6, 0.8, 0.6)
+[sub_resource type="BoxMesh" id="Box_6"]
+size = Vector3(2.04, 0.12, 0.08)
+
+[sub_resource type="BoxMesh" id="Box_7"]
+size = Vector3(0.12, 2.6, 0.08)
+
+[sub_resource type="BoxMesh" id="Box_8"]
+size = Vector3(2.24, 0.12, 0.04)
+
+[sub_resource type="BoxMesh" id="Box_9"]
+size = Vector3(0.12, 2, 0.04)
+
+[sub_resource type="BoxMesh" id="Box_10"]
+size = Vector3(1.84, 0.12, 0.08)
+
+[sub_resource type="BoxMesh" id="Box_11"]
+size = Vector3(1.84, 0.12, 0.2)
+
+[sub_resource type="BoxMesh" id="Box_12"]
+size = Vector3(0.12, 2.6, 0.2)
+
+[sub_resource type="BoxMesh" id="Box_13"]
+size = Vector3(0.7, 2.5, 0.7)
+
+[sub_resource type="BoxMesh" id="Box_14"]
+size = Vector3(0.7, 3.5, 0.7)
+
+[sub_resource type="BoxMesh" id="Box_15"]
+size = Vector3(0.7, 4.5, 0.7)
+
+[sub_resource type="BoxMesh" id="Box_16"]
+size = Vector3(0.7, 2, 0.7)
+
+[sub_resource type="BoxMesh" id="Box_17"]
+size = Vector3(0.7, 6, 0.7)
+
+[sub_resource type="BoxMesh" id="Box_18"]
+size = Vector3(1.2, 1.2, 1.2)
+
+[sub_resource type="SphereMesh" id="Sphere"]
+
+[sub_resource type="PlaneMesh" id="Ground"]
+size = Vector2(60, 60)
 
 [node name="PortalDemo" type="Node3D"]
 
 [node name="Camera3D" type="PathTracingCamera" parent="." node_paths=PackedStringArray("geometry_group")]
-transform = Transform3D(0.963, 0, 0.268, 0, 1, 0, -0.268, 0, 0.963, 1.5, 1.6, 2.4)
-fov = 70.0
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.7, 5)
+fov = 75.0
 geometry_group = NodePath("../GeometryGroup3D")
 max_bounces = 4
 firefly_clamp = 20.0
-sky_energy = 0.0
-script = ExtResource("1_cam")
-move_speed = 2.5
+max_portal_hops = 12
+sky_energy = 0.9
+script = ExtResource("script_cam")
+move_speed = 3.0
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_1")
 
 [node name="GeometryGroup3D" type="GeometryGroup3D" parent="."]
 
-[node name="Room1" type="Node3D" parent="GeometryGroup3D"]
+[node name="Hall" type="Node3D" parent="GeometryGroup3D"]
 
-[node name="Floor" type="MeshInstance3D" parent="GeometryGroup3D/Room1"]
+[node name="Floor" type="MeshInstance3D" parent="GeometryGroup3D/Hall"]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 0)
-mesh = SubResource("Mesh_floor")
-surface_material_override/0 = SubResource("Mat_white")
+mesh = SubResource("Box_0")
+surface_material_override/0 = SubResource("Mat_checker")
 
-[node name="Ceiling" type="MeshInstance3D" parent="GeometryGroup3D/Room1"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.1, 0)
-mesh = SubResource("Mesh_floor")
-surface_material_override/0 = SubResource("Mat_white")
+[node name="Ceiling" type="MeshInstance3D" parent="GeometryGroup3D/Hall"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4.1, 0)
+mesh = SubResource("Box_0")
+surface_material_override/0 = SubResource("Mat_wall")
 
-[node name="WallLeft" type="MeshInstance3D" parent="GeometryGroup3D/Room1"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3.1, 1.5, 0)
-mesh = SubResource("Mesh_wall_x")
+[node name="WallLeft" type="MeshInstance3D" parent="GeometryGroup3D/Hall"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -6.1, 2, 0)
+mesh = SubResource("Box_1")
+surface_material_override/0 = SubResource("Mat_wall")
+
+[node name="WallRight" type="MeshInstance3D" parent="GeometryGroup3D/Hall"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6.1, 2, 0)
+mesh = SubResource("Box_1")
+surface_material_override/0 = SubResource("Mat_wall")
+
+[node name="WallBack" type="MeshInstance3D" parent="GeometryGroup3D/Hall"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, -6.1)
+mesh = SubResource("Box_2")
+surface_material_override/0 = SubResource("Mat_accent")
+
+[node name="WallFront" type="MeshInstance3D" parent="GeometryGroup3D/Hall"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 6.1)
+mesh = SubResource("Box_2")
+surface_material_override/0 = SubResource("Mat_wall")
+
+[node name="LightA" type="MeshInstance3D" parent="GeometryGroup3D/Hall"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 3.98, 0)
+mesh = SubResource("Box_3")
+surface_material_override/0 = SubResource("Mat_light")
+
+[node name="LightB" type="MeshInstance3D" parent="GeometryGroup3D/Hall"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.98, 3.5)
+mesh = SubResource("Box_3")
+surface_material_override/0 = SubResource("Mat_light")
+
+[node name="Pedestal" type="MeshInstance3D" parent="GeometryGroup3D/Hall"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2, 0.5, -1.5)
+mesh = SubResource("Box_4")
+surface_material_override/0 = SubResource("Mat_stone")
+
+[node name="Suzanne" type="MeshInstance3D" parent="GeometryGroup3D/Hall"]
+transform = Transform3D(0.5, 0, 0, 0, 0.5, 0, 0, 0, 0.5, -2, 1.45, -1.5)
+mesh = ExtResource("mesh_suzanne")
+surface_material_override/0 = SubResource("Mat_gold")
+script = ExtResource("script_anim")
+spin_speed = Vector3(0, 0.6, 0)
+
+[node name="Crate" type="MeshInstance3D" parent="GeometryGroup3D/Hall"]
+transform = Transform3D(0.866, 0, 0.5, 0, 1, 0, -0.5, 0, 0.866, 2.2, 0.4, -3.2)
+mesh = SubResource("Box_5")
 surface_material_override/0 = SubResource("Mat_orange")
 
-[node name="WallRight" type="MeshInstance3D" parent="GeometryGroup3D/Room1"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3.1, 1.5, 0)
-mesh = SubResource("Mesh_wall_x")
-surface_material_override/0 = SubResource("Mat_white")
+[node name="Ball" type="MeshInstance3D" parent="GeometryGroup3D/Hall"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3.5, 0.5, 3)
+mesh = SubResource("Sphere")
+surface_material_override/0 = SubResource("Mat_chrome")
 
-[node name="WallBack" type="MeshInstance3D" parent="GeometryGroup3D/Room1"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, -3.1)
-mesh = SubResource("Mesh_wall_z")
-surface_material_override/0 = SubResource("Mat_white")
+[node name="CorridorWest" type="Portal3D" parent="GeometryGroup3D/Hall" node_paths=PackedStringArray("linked_portal")]
+transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, -5.99, 1.4, 0)
+size = Vector2(1.8, 2.6)
+linked_portal = NodePath("../CorridorEast")
+tint = Color(0.85, 0.82, 0.95, 1)
 
-[node name="WallFront" type="MeshInstance3D" parent="GeometryGroup3D/Room1"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 3.1)
-mesh = SubResource("Mesh_wall_z")
-surface_material_override/0 = SubResource("Mat_white")
+[node name="FrameTop" type="MeshInstance3D" parent="GeometryGroup3D/Hall/CorridorWest"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.36, 0)
+mesh = SubResource("Box_6")
+surface_material_override/0 = SubResource("Mat_frame_violet")
 
-[node name="Light" type="MeshInstance3D" parent="GeometryGroup3D/Room1"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.98, 0.5)
-mesh = SubResource("Mesh_panel")
-surface_material_override/0 = SubResource("Mat_light_warm")
+[node name="FrameBottom" type="MeshInstance3D" parent="GeometryGroup3D/Hall/CorridorWest"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1.36, 0)
+mesh = SubResource("Box_6")
+surface_material_override/0 = SubResource("Mat_frame_violet")
 
-[node name="Box" type="MeshInstance3D" parent="GeometryGroup3D/Room1"]
-transform = Transform3D(0.866, 0, 0.5, 0, 1, 0, -0.5, 0, 0.866, -1.6, 0.4, -1)
-mesh = SubResource("Mesh_box")
-surface_material_override/0 = SubResource("Mat_orange")
+[node name="FrameLeft" type="MeshInstance3D" parent="GeometryGroup3D/Hall/CorridorWest"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.96, 0, 0)
+mesh = SubResource("Box_7")
+surface_material_override/0 = SubResource("Mat_frame_violet")
 
-[node name="PortalA" type="Portal3D" parent="GeometryGroup3D/Room1" node_paths=PackedStringArray("linked_portal")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.4, 1.2, -2.99)
-size = Vector2(1.6, 2.4)
-linked_portal = NodePath("../../Room2/PortalB")
+[node name="FrameRight" type="MeshInstance3D" parent="GeometryGroup3D/Hall/CorridorWest"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.96, 0, 0)
+mesh = SubResource("Box_7")
+surface_material_override/0 = SubResource("Mat_frame_violet")
 
-[node name="Room2" type="Node3D" parent="GeometryGroup3D"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -20)
+[node name="CorridorEast" type="Portal3D" parent="GeometryGroup3D/Hall" node_paths=PackedStringArray("linked_portal")]
+transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 5.99, 1.4, 0)
+size = Vector2(1.8, 2.6)
+linked_portal = NodePath("../CorridorWest")
+tint = Color(0.85, 0.82, 0.95, 1)
 
-[node name="Floor" type="MeshInstance3D" parent="GeometryGroup3D/Room2"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 0)
-mesh = SubResource("Mesh_floor")
+[node name="FrameTop" type="MeshInstance3D" parent="GeometryGroup3D/Hall/CorridorEast"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.36, 0)
+mesh = SubResource("Box_6")
+surface_material_override/0 = SubResource("Mat_frame_violet")
+
+[node name="FrameBottom" type="MeshInstance3D" parent="GeometryGroup3D/Hall/CorridorEast"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1.36, 0)
+mesh = SubResource("Box_6")
+surface_material_override/0 = SubResource("Mat_frame_violet")
+
+[node name="FrameLeft" type="MeshInstance3D" parent="GeometryGroup3D/Hall/CorridorEast"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.96, 0, 0)
+mesh = SubResource("Box_7")
+surface_material_override/0 = SubResource("Mat_frame_violet")
+
+[node name="FrameRight" type="MeshInstance3D" parent="GeometryGroup3D/Hall/CorridorEast"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.96, 0, 0)
+mesh = SubResource("Box_7")
+surface_material_override/0 = SubResource("Mat_frame_violet")
+
+[node name="FloorHole" type="Portal3D" parent="GeometryGroup3D/Hall" node_paths=PackedStringArray("linked_portal")]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 3, 0.01, 2)
+size = Vector2(2, 2)
+linked_portal = NodePath("../CeilingHole")
+
+[node name="FrameTop" type="MeshInstance3D" parent="GeometryGroup3D/Hall/FloorHole"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.06, 0)
+mesh = SubResource("Box_8")
+surface_material_override/0 = SubResource("Mat_frame_gold")
+
+[node name="FrameBottom" type="MeshInstance3D" parent="GeometryGroup3D/Hall/FloorHole"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1.06, 0)
+mesh = SubResource("Box_8")
+surface_material_override/0 = SubResource("Mat_frame_gold")
+
+[node name="FrameLeft" type="MeshInstance3D" parent="GeometryGroup3D/Hall/FloorHole"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.06, 0, 0)
+mesh = SubResource("Box_9")
+surface_material_override/0 = SubResource("Mat_frame_gold")
+
+[node name="FrameRight" type="MeshInstance3D" parent="GeometryGroup3D/Hall/FloorHole"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.06, 0, 0)
+mesh = SubResource("Box_9")
+surface_material_override/0 = SubResource("Mat_frame_gold")
+
+[node name="CeilingHole" type="Portal3D" parent="GeometryGroup3D/Hall" node_paths=PackedStringArray("linked_portal")]
+transform = Transform3D(-1, 0, 0, 0, 0, -1, 0, -1, 0, 3, 3.99, 2)
+size = Vector2(2, 2)
+linked_portal = NodePath("../FloorHole")
+
+[node name="FrameTop" type="MeshInstance3D" parent="GeometryGroup3D/Hall/CeilingHole"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.06, 0)
+mesh = SubResource("Box_8")
+surface_material_override/0 = SubResource("Mat_frame_gold")
+
+[node name="FrameBottom" type="MeshInstance3D" parent="GeometryGroup3D/Hall/CeilingHole"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1.06, 0)
+mesh = SubResource("Box_8")
+surface_material_override/0 = SubResource("Mat_frame_gold")
+
+[node name="FrameLeft" type="MeshInstance3D" parent="GeometryGroup3D/Hall/CeilingHole"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.06, 0, 0)
+mesh = SubResource("Box_9")
+surface_material_override/0 = SubResource("Mat_frame_gold")
+
+[node name="FrameRight" type="MeshInstance3D" parent="GeometryGroup3D/Hall/CeilingHole"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.06, 0, 0)
+mesh = SubResource("Box_9")
+surface_material_override/0 = SubResource("Mat_frame_gold")
+
+[node name="GardenDoor" type="Portal3D" parent="GeometryGroup3D/Hall" node_paths=PackedStringArray("linked_portal")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.3, -5.99)
+size = Vector2(1.6, 2.6)
+linked_portal = NodePath("../../Garden/GardenExit")
+
+[node name="FrameTop" type="MeshInstance3D" parent="GeometryGroup3D/Hall/GardenDoor"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.36, 0)
+mesh = SubResource("Box_10")
+surface_material_override/0 = SubResource("Mat_frame_white")
+
+[node name="FrameBottom" type="MeshInstance3D" parent="GeometryGroup3D/Hall/GardenDoor"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1.36, 0)
+mesh = SubResource("Box_10")
+surface_material_override/0 = SubResource("Mat_frame_white")
+
+[node name="FrameLeft" type="MeshInstance3D" parent="GeometryGroup3D/Hall/GardenDoor"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.86, 0, 0)
+mesh = SubResource("Box_7")
+surface_material_override/0 = SubResource("Mat_frame_white")
+
+[node name="FrameRight" type="MeshInstance3D" parent="GeometryGroup3D/Hall/GardenDoor"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.86, 0, 0)
+mesh = SubResource("Box_7")
+surface_material_override/0 = SubResource("Mat_frame_white")
+
+[node name="Garden" type="Node3D" parent="GeometryGroup3D"]
+transform = Transform3D(-1, 0, 0, 0, 1, 0, 0, 0, -1, 0, 0, -80)
+
+[node name="Ground" type="MeshInstance3D" parent="GeometryGroup3D/Garden"]
+mesh = SubResource("Ground")
 surface_material_override/0 = SubResource("Mat_grass")
 
-[node name="Ceiling" type="MeshInstance3D" parent="GeometryGroup3D/Room2"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.1, 0)
-mesh = SubResource("Mesh_floor")
-surface_material_override/0 = SubResource("Mat_white")
+[node name="GardenExit" type="Portal3D" parent="GeometryGroup3D/Garden" node_paths=PackedStringArray("linked_portal")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.3, 0)
+size = Vector2(1.6, 2.6)
+linked_portal = NodePath("../../Hall/GardenDoor")
 
-[node name="WallLeft" type="MeshInstance3D" parent="GeometryGroup3D/Room2"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3.1, 1.5, 0)
-mesh = SubResource("Mesh_wall_x")
-surface_material_override/0 = SubResource("Mat_blue")
+[node name="FrameTop" type="MeshInstance3D" parent="GeometryGroup3D/Garden/GardenExit"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.36, 0)
+mesh = SubResource("Box_11")
+surface_material_override/0 = SubResource("Mat_frame_white")
 
-[node name="WallRight" type="MeshInstance3D" parent="GeometryGroup3D/Room2"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3.1, 1.5, 0)
-mesh = SubResource("Mesh_wall_x")
-surface_material_override/0 = SubResource("Mat_teal")
+[node name="FrameBottom" type="MeshInstance3D" parent="GeometryGroup3D/Garden/GardenExit"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1.36, 0)
+mesh = SubResource("Box_11")
+surface_material_override/0 = SubResource("Mat_frame_white")
 
-[node name="WallBack" type="MeshInstance3D" parent="GeometryGroup3D/Room2"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, -3.1)
-mesh = SubResource("Mesh_wall_z")
-surface_material_override/0 = SubResource("Mat_blue")
+[node name="FrameLeft" type="MeshInstance3D" parent="GeometryGroup3D/Garden/GardenExit"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.86, 0, 0)
+mesh = SubResource("Box_12")
+surface_material_override/0 = SubResource("Mat_frame_white")
 
-[node name="WallFront" type="MeshInstance3D" parent="GeometryGroup3D/Room2"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 3.1)
-mesh = SubResource("Mesh_wall_z")
-surface_material_override/0 = SubResource("Mat_blue")
+[node name="FrameRight" type="MeshInstance3D" parent="GeometryGroup3D/Garden/GardenExit"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.86, 0, 0)
+mesh = SubResource("Box_12")
+surface_material_override/0 = SubResource("Mat_frame_white")
 
-[node name="Light" type="MeshInstance3D" parent="GeometryGroup3D/Room2"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.98, 0)
-mesh = SubResource("Mesh_panel")
-surface_material_override/0 = SubResource("Mat_light_cool")
+[node name="Pillar0" type="MeshInstance3D" parent="GeometryGroup3D/Garden"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4, 1.25, 6)
+mesh = SubResource("Box_13")
+surface_material_override/0 = SubResource("Mat_stone")
 
-[node name="Pedestal" type="MeshInstance3D" parent="GeometryGroup3D/Room2"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.8, 0.4, 0)
-mesh = SubResource("Mesh_pedestal")
-surface_material_override/0 = SubResource("Mat_white")
+[node name="Pillar1" type="MeshInstance3D" parent="GeometryGroup3D/Garden"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4, 1.75, 7)
+mesh = SubResource("Box_14")
+surface_material_override/0 = SubResource("Mat_stone")
 
-[node name="Suzanne" type="MeshInstance3D" parent="GeometryGroup3D/Room2"]
-transform = Transform3D(0, 0, -0.6, 0, 0.6, 0, 0.6, 0, 0, -0.8, 1.25, 0)
-mesh = ExtResource("6_suz")
+[node name="Pillar2" type="MeshInstance3D" parent="GeometryGroup3D/Garden"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -6, 2.25, 12)
+mesh = SubResource("Box_15")
+surface_material_override/0 = SubResource("Mat_stone")
+
+[node name="Pillar3" type="MeshInstance3D" parent="GeometryGroup3D/Garden"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5, 1, 14)
+mesh = SubResource("Box_16")
+surface_material_override/0 = SubResource("Mat_stone")
+
+[node name="Pillar4" type="MeshInstance3D" parent="GeometryGroup3D/Garden"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3, 18)
+mesh = SubResource("Box_17")
+surface_material_override/0 = SubResource("Mat_stone")
+
+[node name="RedBlock" type="MeshInstance3D" parent="GeometryGroup3D/Garden"]
+transform = Transform3D(0.8, 0, 0.6, 0, 1, 0, -0.6, 0, 0.8, -1.8, 0.6, 9)
+mesh = SubResource("Box_18")
+surface_material_override/0 = SubResource("Mat_red")
+
+[node name="GoldBall" type="MeshInstance3D" parent="GeometryGroup3D/Garden"]
+transform = Transform3D(1.6, 0, 0, 0, 1.6, 0, 0, 0, 1.6, 1.8, 0.8, 4.5)
+mesh = SubResource("Sphere")
 surface_material_override/0 = SubResource("Mat_gold")
-script = ExtResource("3_anim")
-spin_speed = Vector3(0, 0.5, 0)
+script = ExtResource("script_anim")
+spin_speed = Vector3(0, 0, 0)
+bob_amplitude = Vector3(0, 0.3, 0)
+bob_speed = 1.3
 
-[node name="PortalB" type="Portal3D" parent="GeometryGroup3D/Room2" node_paths=PackedStringArray("linked_portal")]
-transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 2.99, 1.2, 0.6)
-size = Vector2(1.6, 2.4)
-linked_portal = NodePath("../../Room1/PortalA")
+[node name="Sun" type="DirectionalLight3D" parent="GeometryGroup3D/Garden"]
+transform = Transform3D(0.8892, 0, 0.45, -0.378, 0.54, 0.75, -0.243, -0.84, 0.48, 0, 10, 0)
+light_color = Color(1, 0.93, 0.8, 1)
+light_energy = 1.6
+light_angular_distance = 1.5
+shadow_enabled = true
 
 [node name="Label" type="Label" parent="." node_paths=PackedStringArray("camera", "geometry_group")]
 offset_left = 8.0
 offset_top = 8.0
 offset_right = 48.0
 offset_bottom = 31.0
-script = ExtResource("2_fps")
+script = ExtResource("script_fps")
 camera = NodePath("../Camera3D")
 geometry_group = NodePath("../GeometryGroup3D")
 
 [node name="Capture" type="Node" parent="."]
-script = ExtResource("4_capt")
+script = ExtResource("script_capture")

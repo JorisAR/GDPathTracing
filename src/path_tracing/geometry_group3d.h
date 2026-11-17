@@ -34,6 +34,10 @@ class GeometryGroup3D : public Node3D
     // Re-reads transforms, visibility and lights; cheap when nothing moved.
     void update_dynamic(bool force = false);
 
+    // Editor preview: builds on first use and tracks transforms while at least one preview runs.
+    void begin_editor_preview();
+    void end_editor_preview();
+
     PT::SceneDataPtr get_scene_data() const
     {
         return scene_data;
@@ -108,6 +112,7 @@ class GeometryGroup3D : public Node3D
     PackedByteArray last_portal_bytes;
     bool moved_last_update = false;
     bool built = false;
+    int editor_preview_users = 0;
 };
 
 #endif // GEOMETRY_GROUP3D_H

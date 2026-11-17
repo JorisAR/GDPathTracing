@@ -24,6 +24,38 @@ namespace
 const char *CONTEXT = "jar_path_tracing";
 const char *HISTORY_NAMES[2] = {"history0", "history1"};
 const char *GBUFFER_NAMES[2] = {"gbuffer0", "gbuffer1"};
+const char *AUX_NAMES[2] = {"aux0", "aux1"};
+const char *DENOISE_NAMES[2] = {"denoise0", "denoise1"};
+const char *FRAME_COLOR = "frame_color";
+const char *FRAME_MOTION = "frame_motion";
+const char *FRAME_ALBEDO = "frame_albedo";
+
+// Mirror of the push constant block in resolve.glsl.
+struct ResolveParams
+{
+    int32_t size[2];
+    uint32_t flags;
+    uint32_t history_cap;
+};
+
+// Mirror of the push constant block in denoise.glsl.
+struct DenoiseParams
+{
+    int32_t size[2];
+    int32_t step;
+    int32_t mode;
+    float sigma_luminance;
+    float sigma_normal;
+    float sigma_depth;
+    float pad;
+};
+static_assert(sizeof(DenoiseParams) == 32, "DenoiseParams must match denoise.glsl");
+enum DenoiseMode : int32_t
+{
+    DENOISE_PREPARE = 0,
+    DENOISE_FILTER = 1,
+    DENOISE_FINAL = 2,
+};
 
 enum FrameFlags : uint32_t
 {
@@ -109,11 +141,14 @@ void PathTracingEffect::_notification(int p_what)
         free_resources();
 }
 
-void PathTracingEffect::set_shader_files(const Ref<RDShaderFile> &p_software, const Ref<RDShaderFile> &p_hardware)
+void PathTracingEffect::set_shader_files(const Ref<RDShaderFile> &p_software, const Ref<RDShaderFile> &p_hardware,
+                                         const Ref<RDShaderFile> &p_resolver, const Ref<RDShaderFile> &p_denoiser)
 {
     std::lock_guard<std::mutex> lock(mutex);
     software_file = p_software;
     hardware_file = p_hardware;
+    resolve_file = p_resolver;
+    denoise_file = p_denoiser;
 }
 
 void PathTracingEffect::set_scene(const SceneDataPtr &p_scene)
@@ -171,6 +206,10 @@ void PathTracingEffect::free_resources()
     // Freeing a shader also frees its pipeline and the cached uniform sets that depend on it.
     if (software.shader.is_valid())
         rd->free_rid(software.shader);
+    if (denoiser.shader.is_valid())
+        rd->free_rid(denoiser.shader);
+    if (resolver.shader.is_valid())
+        rd->free_rid(resolver.shader);
     if (hardware.sbt.is_valid())
     {
         rd->hit_sbt_range_free(hardware.sbt, hardware.sbt_range);
@@ -190,6 +229,8 @@ void PathTracingEffect::free_resources()
         b->free(rd);
     software = Pipeline();
     hardware = Pipeline();
+    denoiser = Pipeline();
+    resolver = Pipeline();
     sampler = RID();
     texture_array = RID();
     device = nullptr;
@@ -438,6 +479,40 @@ void PathTracingEffect::upload_scene(RenderingDevice *rd, const SceneSnapshot &s
     }
 }
 
+void PathTracingEffect::run_denoiser(RenderingDevice *rd, const Ref<RenderSceneBuffersRD> &buffers,
+                                     const Vector2i &size, uint32_t slot, int iterations)
+{
+    RID tmp[2] = {ensure_texture(buffers, DENOISE_NAMES[0], size), ensure_texture(buffers, DENOISE_NAMES[1], size)};
+    RID color = buffers->get_color_layer(0);
+
+    DenoiseParams params{};
+    params.size[0] = size.x;
+    params.size[1] = size.y;
+    params.sigma_luminance = 4.0f;
+    params.sigma_normal = 128.0f;
+    params.sigma_depth = 1.0f;
+
+    // Pass 0 prepares tmp[0]; filter pass i reads tmp[i % 2] and writes tmp[(i + 1) % 2]; the
+    // last one writes the color buffer instead.
+    const int passes = 1 + iterations;
+    for (int pass = 0; pass < passes; pass++)
+    {
+        RID src = pass == 0 ? tmp[1] : tmp[(pass - 1) % 2];
+        RID dst = pass == 0 ? tmp[0] : tmp[pass % 2];
+        params.mode = pass == 0 ? DENOISE_PREPARE : (pass == passes - 1 ? DENOISE_FINAL : DENOISE_FILTER);
+        params.step = pass == 0 ? 1 : 1 << (pass - 1);
+
+        TypedArray<RDUniform> uniforms;
+        uniforms.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 0, {history_textures[slot]}));
+        uniforms.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 1, {gbuffer_textures[slot]}));
+        uniforms.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 2, {aux_textures[slot]}));
+        uniforms.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 3, {src}));
+        uniforms.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 4, {dst}));
+        uniforms.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 5, {color}));
+        dispatch_compute(rd, denoiser, uniforms, to_bytes(&params, 1), size);
+    }
+}
+
 void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderData *p_render_data)
 {
     if (p_effect_callback_type != EFFECT_CALLBACK_TYPE_POST_TRANSPARENT || p_render_data == nullptr)
@@ -452,13 +527,15 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
 
     SceneDataPtr scene_ptr;
     RenderSettings current;
-    Ref<RDShaderFile> sw_file, hw_file;
+    Ref<RDShaderFile> sw_file, hw_file, rs_file, dn_file;
     {
         std::lock_guard<std::mutex> lock(mutex);
         scene_ptr = scene;
         current = settings;
         sw_file = software_file;
         hw_file = hardware_file;
+        rs_file = resolve_file;
+        dn_file = denoise_file;
     }
     if (!scene_ptr)
         return;
@@ -475,6 +552,8 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
         warned = true;
     }
     if (!use_hardware && !ensure_pipeline(rd, software, sw_file, "jar_path_tracing_sw"))
+        return;
+    if (!ensure_pipeline(rd, resolver, rs_file, "jar_path_tracing_resolve"))
         return;
     const Pipeline &pipe = use_hardware ? hardware : software;
 
@@ -510,10 +589,12 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
     {
         RID h = ensure_texture(buffers, HISTORY_NAMES[i], size);
         RID g = ensure_texture(buffers, GBUFFER_NAMES[i], size);
-        if (h != history_textures[i] || g != gbuffer_textures[i])
+        RID a = ensure_texture(buffers, AUX_NAMES[i], size);
+        if (h != history_textures[i] || g != gbuffer_textures[i] || a != aux_textures[i])
             reset = true;
         history_textures[i] = h;
         gbuffer_textures[i] = g;
+        aux_textures[i] = a;
     }
 
     const Transform3D cam_transform = scene_data->get_cam_transform();
@@ -567,7 +648,6 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
     fd.size[0] = size.x;
     fd.size[1] = size.y;
     fd.frame_index = frame_index++;
-    fd.history_cap = history_cap;
     fd.max_bounces = static_cast<uint32_t>(MAX(current.max_bounces, 0));
     fd.samples_per_pixel = static_cast<uint32_t>(MAX(current.samples_per_pixel, 1));
     fd.instance_count = instance_count;
@@ -578,7 +658,6 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
     fd.debug_mode = static_cast<uint32_t>(current.debug_mode);
     fd.portal_count = portal_count;
     fd.max_portal_hops = static_cast<uint32_t>(MAX(current.max_portal_hops, 0));
-    fd.flags = (temporal ? FLAG_REPROJECT : 0u) | (done ? FLAG_COPY_ONLY : 0u) | (reset ? FLAG_RESET : 0u);
     frame_buffer.upload(rd, to_bytes(&fd, 1));
 
     last_cam_transform = cam_transform;
@@ -589,13 +668,72 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
     const uint32_t write_slot = parity;
     const uint32_t read_slot = 1u - parity;
 
+    const RID frame_color = ensure_texture(buffers, FRAME_COLOR, size);
+    const RID frame_motion = ensure_texture(buffers, FRAME_MOTION, size);
+    const RID frame_albedo = ensure_texture(buffers, FRAME_ALBEDO, size);
+    const RID color_image = buffers->get_color_layer(0);
+
+    if (!done)
+        trace(rd, pipe, use_hardware, size, frame_color, frame_motion, frame_albedo, gbuffer_textures[write_slot]);
+
+    // Temporal resolve: history (read slot) + this frame -> history (write slot) and the color buffer.
+    {
+        ResolveParams params{};
+        params.size[0] = size.x;
+        params.size[1] = size.y;
+        params.flags = (temporal ? FLAG_REPROJECT : 0u) | (done ? FLAG_COPY_ONLY : 0u) | (reset ? FLAG_RESET : 0u);
+        params.history_cap = history_cap;
+        const RID images[] = {frame_color,
+                              frame_motion,
+                              frame_albedo,
+                              gbuffer_textures[write_slot],
+                              gbuffer_textures[read_slot],
+                              history_textures[read_slot],
+                              aux_textures[read_slot],
+                              history_textures[write_slot],
+                              aux_textures[write_slot],
+                              color_image};
+        TypedArray<RDUniform> uniforms;
+        for (int i = 0; i < 10; i++)
+            uniforms.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, i, {images[i]}));
+        dispatch_compute(rd, resolver, uniforms, to_bytes(&params, 1), size);
+    }
+
+    // Spatial denoising of the accumulated image. When `done`, the history was not rewritten this
+    // frame and the final image lives in the read slot.
+    if (current.denoise && current.denoise_iterations > 0 && current.debug_mode == 0 &&
+        ensure_pipeline(rd, denoiser, dn_file, "jar_path_tracing_denoise"))
+        run_denoiser(rd, buffers, size, done ? read_slot : write_slot, current.denoise_iterations);
+
+    if (!done)
+    {
+        parity = 1u - parity;
+        frames_since_change++;
+    }
+    sample_count = static_cast<int>(current.accumulate ? frames_since_change : 1);
+}
+
+void PathTracingEffect::dispatch_compute(RenderingDevice *rd, const Pipeline &p, const TypedArray<RDUniform> &uniforms,
+                                         const PackedByteArray &push_constant, const Vector2i &size)
+{
+    RID set = UniformSetCacheRD::get_cache(p.shader, 0, uniforms);
+    int64_t list = rd->compute_list_begin();
+    rd->compute_list_bind_compute_pipeline(list, p.pipeline);
+    rd->compute_list_bind_uniform_set(list, set, 0);
+    rd->compute_list_set_push_constant(list, push_constant, static_cast<uint32_t>(push_constant.size()));
+    rd->compute_list_dispatch(list, (size.x + 7) / 8, (size.y + 7) / 8, 1);
+    rd->compute_list_end();
+}
+
+void PathTracingEffect::trace(RenderingDevice *rd, const Pipeline &pipe, bool use_hardware, const Vector2i &size,
+                              RID frame_color, RID frame_motion, RID frame_albedo, RID gbuffer)
+{
     TypedArray<RDUniform> set0;
     set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_UNIFORM_BUFFER, 0, {frame_buffer.rid()}));
-    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 1, {buffers->get_color_layer(0)}));
-    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 2, {history_textures[write_slot]}));
-    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 3, {history_textures[read_slot]}));
-    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 4, {gbuffer_textures[write_slot]}));
-    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 5, {gbuffer_textures[read_slot]}));
+    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 1, {frame_color}));
+    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 2, {frame_motion}));
+    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 3, {frame_albedo}));
+    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 4, {gbuffer}));
 
     TypedArray<RDUniform> set1;
     const RID storage[] = {bvh_buffer.rid(),      triangle_buffer.rid(), triangle_data_buffer.rid(),
@@ -635,11 +773,4 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
         rd->compute_list_dispatch(list, (size.x + 7) / 8, (size.y + 7) / 8, 1);
         rd->compute_list_end();
     }
-
-    if (!done)
-    {
-        parity = 1u - parity;
-        frames_since_change++;
-    }
-    sample_count = static_cast<int>(current.accumulate ? frames_since_change : 1);
 }

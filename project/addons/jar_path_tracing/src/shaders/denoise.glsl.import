@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://coe403m7dfws7"
+path="res://.godot/imported/denoise.glsl-4b9a55c8bc9d8cbbf5bca7edb604f0cf.res"
+
+[deps]
+
+source_file="res://addons/jar_path_tracing/src/shaders/denoise.glsl"
+dest_files=["res://.godot/imported/denoise.glsl-4b9a55c8bc9d8cbbf5bca7edb604f0cf.res"]
+
+[params]
+

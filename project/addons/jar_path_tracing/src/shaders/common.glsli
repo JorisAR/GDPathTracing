@@ -9,9 +9,6 @@
 #define DEBUG_ALBEDO 2u
 #define DEBUG_TRAVERSAL 3u
 
-#define FLAG_REPROJECT 1u // temporal reprojection of history (otherwise history is read at the same pixel)
-#define FLAG_COPY_ONLY 2u // just present the stored history
-#define FLAG_RESET 4u     // discard history
 
 #define TLAS_LEAF 0xFFFFFFFFu
 #define INSTANCE_FLAG_EMISSIVE 1u
@@ -112,7 +109,7 @@ layout(set = 0, binding = 0, std140) uniform FrameData {
     vec4 ground;      // rgb * energy
     ivec2 size;
     uint frame_index;
-    uint history_cap; // max history length used for blending (1 = no accumulation)
+    uint pad1;
     uint max_bounces;
     uint samples_per_pixel;
     uint instance_count;
@@ -127,11 +124,12 @@ layout(set = 0, binding = 0, std140) uniform FrameData {
     uint pad0;
 } frame;
 
-layout(set = 0, binding = 1, rgba16f) uniform restrict writeonly image2D color_image;
-layout(set = 0, binding = 2, rgba32f) uniform restrict writeonly image2D history_out; // rgb radiance, a history length
-layout(set = 0, binding = 3, rgba32f) uniform restrict readonly image2D history_in;
-layout(set = 0, binding = 4, rgba32f) uniform restrict writeonly image2D gbuffer_out; // xyz normal, w distance (-1 = sky)
-layout(set = 0, binding = 5, rgba32f) uniform restrict readonly image2D gbuffer_in;
+// Outputs of the tracing pass. Accumulation happens afterwards in resolve.glsl; keeping this
+// pass free of history reads keeps the (large) tracing kernel small.
+layout(set = 0, binding = 1, rgba32f) uniform restrict writeonly image2D frame_color;  // rgb this frame's radiance
+layout(set = 0, binding = 2, rgba32f) uniform restrict writeonly image2D frame_motion; // xy previous pixel, z expected previous distance (-1 sky), w 1 = valid
+layout(set = 0, binding = 3, rgba32f) uniform restrict writeonly image2D frame_albedo; // rgb primary albedo
+layout(set = 0, binding = 4, rgba32f) uniform restrict writeonly image2D gbuffer_out;  // xyz normal, w distance (-1 = sky)
 
 layout(set = 1, binding = 0, std430) restrict readonly buffer BVHNodes { BVHNode bvh_nodes[]; };
 layout(set = 1, binding = 1, std430) restrict readonly buffer Triangles { Triangle triangles[]; };

@@ -1,7 +1,10 @@
 #include "path_tracing_camera.h"
 
 #include <godot_cpp/classes/compositor.hpp>
+#include <godot_cpp/classes/editor_interface.hpp>
 #include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/os.hpp>
+#include <godot_cpp/classes/sub_viewport.hpp>
 #include <godot_cpp/classes/rd_shader_file.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/scene_tree.hpp>
@@ -10,6 +13,8 @@
 
 static const char *SHADER_PATH = "res://addons/jar_path_tracing/src/shaders/main.glsl";
 static const char *HW_SHADER_PATH = "res://addons/jar_path_tracing/src/shaders/main_hw.glsl";
+static const char *RESOLVE_SHADER_PATH = "res://addons/jar_path_tracing/src/shaders/resolve.glsl";
+static const char *DENOISE_SHADER_PATH = "res://addons/jar_path_tracing/src/shaders/denoise.glsl";
 
 void PathTracingCamera::_bind_methods()
 {
@@ -33,12 +38,26 @@ void PathTracingCamera::_bind_methods()
     PT_PROP(Variant::INT, debug_view, PROPERTY_HINT_ENUM, "None,Normals,Albedo,Traversal Cost")
     PT_PROP(Variant::INT, max_portal_hops, PROPERTY_HINT_RANGE, "0,64,1")
 
+    ADD_GROUP("Denoising", "");
+    PT_PROP(Variant::BOOL, denoise, PROPERTY_HINT_NONE, "")
+    PT_PROP(Variant::INT, denoise_iterations, PROPERTY_HINT_RANGE, "1,6,1")
+
     ADD_GROUP("Sky", "");
     PT_PROP(Variant::COLOR, sky_top_color, PROPERTY_HINT_NONE, "")
     PT_PROP(Variant::COLOR, sky_horizon_color, PROPERTY_HINT_NONE, "")
     PT_PROP(Variant::COLOR, ground_color, PROPERTY_HINT_NONE, "")
     PT_PROP(Variant::FLOAT, sky_energy, PROPERTY_HINT_RANGE, "0,16,0.01,or_greater")
 #undef PT_PROP
+
+    ADD_GROUP("Editor", "");
+    ClassDB::bind_method(D_METHOD("get_editor_preview"), &PathTracingCamera::get_editor_preview);
+    ClassDB::bind_method(D_METHOD("set_editor_preview", "value"), &PathTracingCamera::set_editor_preview);
+    ADD_PROPERTY(PropertyInfo(Variant::BOOL, "editor_preview"), "set_editor_preview", "get_editor_preview");
+    ClassDB::bind_method(D_METHOD("get_rebuild_scene_button"), &PathTracingCamera::get_rebuild_scene_button);
+    ADD_PROPERTY(PropertyInfo(Variant::CALLABLE, "rebuild_scene_button", PROPERTY_HINT_TOOL_BUTTON,
+                              "Rebuild Scene,Reload", PROPERTY_USAGE_EDITOR),
+                 "", "get_rebuild_scene_button");
+    ClassDB::bind_method(D_METHOD("rebuild_scene"), &PathTracingCamera::rebuild_scene);
 
     ClassDB::bind_method(D_METHOD("get_sample_count"), &PathTracingCamera::get_sample_count);
     ClassDB::bind_method(D_METHOD("reset_accumulation"), &PathTracingCamera::reset_accumulation);
@@ -57,7 +76,23 @@ void PathTracingCamera::_bind_methods()
 void PathTracingCamera::_notification(int p_what)
 {
     if (Engine::get_singleton()->is_editor_hint())
+    {
+        switch (p_what)
+        {
+        case NOTIFICATION_READY:
+            set_process_internal(true);
+            update_editor_preview();
+            break;
+        case NOTIFICATION_INTERNAL_PROCESS:
+            if (editor_preview)
+                update_editor_preview(); // follows the editor camera, group changes etc.
+            break;
+        case NOTIFICATION_EXIT_TREE:
+            stop_editor_preview();
+            break;
+        }
         return;
+    }
 
     switch (p_what)
     {
@@ -82,27 +117,47 @@ static GeometryGroup3D *find_group(Node *node)
     return nullptr;
 }
 
+GeometryGroup3D *PathTracingCamera::resolve_group()
+{
+    if (geometry_group != nullptr)
+        return geometry_group;
+    if (get_tree() == nullptr)
+        return nullptr;
+    Node *root = Engine::get_singleton()->is_editor_hint() ? get_tree()->get_edited_scene_root()
+                                                           : get_tree()->get_current_scene();
+    return root != nullptr ? find_group(root) : nullptr;
+}
+
+Ref<PathTracingEffect> PathTracingCamera::create_effect()
+{
+    Ref<RDShaderFile> shader_file = ResourceLoader::get_singleton()->load(SHADER_PATH);
+    if (shader_file.is_null())
+    {
+        UtilityFunctions::printerr("[PathTracing] could not load ", SHADER_PATH);
+        return Ref<PathTracingEffect>();
+    }
+    // Optional: only used when the GPU supports the ray tracing pipeline.
+    Ref<RDShaderFile> hw_shader_file = ResourceLoader::get_singleton()->load(HW_SHADER_PATH);
+    Ref<RDShaderFile> resolve_file = ResourceLoader::get_singleton()->load(RESOLVE_SHADER_PATH);
+    Ref<RDShaderFile> denoise_file = ResourceLoader::get_singleton()->load(DENOISE_SHADER_PATH);
+
+    Ref<PathTracingEffect> e;
+    e.instantiate();
+    e->set_shader_files(shader_file, hw_shader_file, resolve_file, denoise_file);
+    return e;
+}
+
 void PathTracingCamera::setup()
 {
-    if (geometry_group == nullptr && get_tree() != nullptr && get_tree()->get_current_scene() != nullptr)
-        geometry_group = find_group(get_tree()->get_current_scene());
+    geometry_group = resolve_group();
     if (geometry_group == nullptr)
     {
         UtilityFunctions::printerr("[PathTracing] PathTracingCamera has no GeometryGroup3D.");
         return;
     }
-
-    Ref<RDShaderFile> shader_file = ResourceLoader::get_singleton()->load(SHADER_PATH);
-    if (shader_file.is_null())
-    {
-        UtilityFunctions::printerr("[PathTracing] could not load ", SHADER_PATH);
+    effect = create_effect();
+    if (effect.is_null())
         return;
-    }
-    // Optional: only used when the GPU supports the ray tracing pipeline.
-    Ref<RDShaderFile> hw_shader_file = ResourceLoader::get_singleton()->load(HW_SHADER_PATH);
-
-    effect.instantiate();
-    effect->set_shader_files(shader_file, hw_shader_file);
     effect->set_scene(geometry_group->get_scene_data());
 
     Ref<Compositor> compositor = get_compositor();
@@ -125,6 +180,106 @@ void PathTracingCamera::push_settings()
     effect->set_settings(settings);
     if (geometry_group != nullptr)
         effect->set_scene(geometry_group->get_scene_data());
+}
+
+// ----------------------------------- EDITOR PREVIEW -----------------------------------
+
+void PathTracingCamera::update_editor_preview()
+{
+    if (!editor_preview || !is_inside_tree())
+    {
+        stop_editor_preview();
+        return;
+    }
+    EditorInterface *editor = EditorInterface::get_singleton();
+    GeometryGroup3D *group = resolve_group();
+    if (editor == nullptr || group == nullptr)
+        return;
+
+    // Follow the group (it may have been assigned or replaced).
+    if (preview_group != ObjectID(group->get_instance_id()))
+    {
+        if (GeometryGroup3D *old = Object::cast_to<GeometryGroup3D>(ObjectDB::get_instance(preview_group)))
+            old->end_editor_preview();
+        group->begin_editor_preview();
+        preview_group = ObjectID(group->get_instance_id());
+    }
+
+    if (effect.is_null())
+    {
+        effect = create_effect();
+        if (effect.is_null())
+            return;
+    }
+
+    // Path trace the main editor 3D viewport through its own camera. The compositor lives only on
+    // that internal camera, so nothing is saved into the scene.
+    SubViewport *viewport = editor->get_editor_viewport_3d(0);
+    Camera3D *camera = viewport != nullptr ? viewport->get_camera_3d() : nullptr;
+    if (camera == nullptr)
+        return;
+    if (preview_camera != ObjectID(camera->get_instance_id()))
+    {
+        if (Camera3D *old = Object::cast_to<Camera3D>(ObjectDB::get_instance(preview_camera)))
+            old->set_compositor(Ref<Compositor>());
+        Ref<Compositor> compositor;
+        compositor.instantiate();
+        TypedArray<CompositorEffect> effects;
+        effects.push_back(effect);
+        compositor->set_compositor_effects(effects);
+        camera->set_compositor(compositor);
+        preview_camera = ObjectID(camera->get_instance_id());
+    }
+
+    if (!preview_active)
+    {
+        // Accumulation needs a continuous redraw; the editor normally only redraws on changes.
+        saved_low_processor_mode = OS::get_singleton()->is_in_low_processor_usage_mode();
+        OS::get_singleton()->set_low_processor_usage_mode(false);
+        preview_active = true;
+    }
+
+    geometry_group = group;
+    push_settings();
+}
+
+void PathTracingCamera::stop_editor_preview()
+{
+    if (Camera3D *camera = Object::cast_to<Camera3D>(ObjectDB::get_instance(preview_camera)))
+        camera->set_compositor(Ref<Compositor>());
+    preview_camera = ObjectID();
+    if (GeometryGroup3D *group = Object::cast_to<GeometryGroup3D>(ObjectDB::get_instance(preview_group)))
+        group->end_editor_preview();
+    preview_group = ObjectID();
+    if (preview_active)
+    {
+        OS::get_singleton()->set_low_processor_usage_mode(saved_low_processor_mode);
+        preview_active = false;
+    }
+    effect.unref();
+}
+
+bool PathTracingCamera::get_editor_preview() const
+{
+    return editor_preview;
+}
+void PathTracingCamera::set_editor_preview(bool value)
+{
+    editor_preview = value;
+    if (Engine::get_singleton()->is_editor_hint() && is_inside_tree())
+        update_editor_preview();
+}
+
+Callable PathTracingCamera::get_rebuild_scene_button()
+{
+    return callable_mp(this, &PathTracingCamera::rebuild_scene);
+}
+
+void PathTracingCamera::rebuild_scene()
+{
+    if (GeometryGroup3D *group = resolve_group())
+        group->build();
+    reset_accumulation();
 }
 
 // ----------------------------------- PROPERTIES -----------------------------------
@@ -257,6 +412,22 @@ int PathTracingCamera::get_max_portal_hops() const
 void PathTracingCamera::set_max_portal_hops(int value)
 {
     settings.max_portal_hops = MAX(0, value);
+}
+bool PathTracingCamera::get_denoise() const
+{
+    return settings.denoise;
+}
+void PathTracingCamera::set_denoise(bool value)
+{
+    settings.denoise = value;
+}
+int PathTracingCamera::get_denoise_iterations() const
+{
+    return settings.denoise_iterations;
+}
+void PathTracingCamera::set_denoise_iterations(int value)
+{
+    settings.denoise_iterations = CLAMP(value, 1, 6);
 }
 String PathTracingCamera::get_active_backend() const
 {

@@ -2,7 +2,8 @@
 
 Notes on the rework that brought the plugin to Godot 4.7. Phases 0–3 (toolchain, pipeline,
 lighting, dynamic scenes) came first; then the hardware ray tracing backend, temporal
-accumulation and portals. A spatial denoiser and the portal puzzle game are still to do (see the end).
+accumulation and portals; then a spatial denoiser, a bigger portal demo and an editor preview. The
+portal puzzle game is still to do (see the end).
 
 ## TL;DR
 
@@ -17,19 +18,21 @@ accumulation and portals. A spatial denoiser and the portal puzzle game are stil
 | Tracing | Software BVH only | Hardware RT pipeline (RT cores) when available, software BVH as fallback |
 | Motion | Accumulation reset on any change | Temporal reprojection with per-instance motion and history rejection |
 | Portals | — | `Portal3D` node: rays and the fly camera pass through linked portals |
+| Denoising | — | SVGF-style à-trous filter with albedo demodulation and temporal variance |
+| Editor | Nothing in the editor | `editor_preview` path traces the editor's 3D viewport |
 
 Measured on an RTX 4070 Ti SUPER, GPU time of the whole viewport (including Godot's own raster
 pass and UI), from `capture.gd`:
 
-| Scene | Software (compute BVH) | Hardware (RT pipeline) |
+| Scene (1080p, animated, temporal on) | Software (compute BVH) | Hardware (RT pipeline) |
 |---|---|---|
-| Cornell demo, 1080p, 5 bounces, animated, temporal on | 7.9 ms | 3.5 ms |
-| Cornell demo, 1152×648, animated | 3.1 ms | 1.3 ms (1.05 ms without temporal) |
-| Lights demo (5k tris, 3 punctual lights + emissive), 1080p, static | 3.0 ms | 2.0 ms |
-| Portal demo, 1152×648, static | 2.1 ms | 1.5 ms |
+| Cornell demo, 5 bounces, denoiser on | 10.5 ms | 4.9 ms |
+| Cornell demo, denoiser off | 8.9 ms | 3.3 ms |
+| Portal demo (6 portals, recursive views), denoiser on | 12.5 ms | 8.3 ms |
+| Portal demo, denoiser off | 11.0 ms | 6.6 ms |
 
-Both backends converge to the same image (mean difference < 0.05/255 on the Cornell and lights
-demos).
+The denoiser (4 iterations) costs about 1.5 ms at 1080p. Both backends converge to the same image
+(mean difference < 0.05/255 on the Cornell and lights demos).
 
 I did not benchmark the old build (it needed the old GDCS + godot-cpp 4.3 toolchain), so there is
 no exact before/after number. The old per-frame GPU→CPU→GPU round trip alone typically costs
@@ -64,14 +67,22 @@ the one assigned) and appends a `PathTracingEffect`. The effect runs at
 
 1. Takes a snapshot of the scene data published by `GeometryGroup3D` (mutex + versions, see
    `scene_data.h`) and re-uploads only what changed.
-2. Gets ping-pong `rgba32f` history and G-buffer textures from `RenderSceneBuffersRD` (context
-   `jar_path_tracing`). They follow viewport resizes automatically.
+2. Gets its textures (ping-pong history, G-buffer and moments; per-frame color, motion and albedo;
+   denoiser scratch) from `RenderSceneBuffersRD` (context `jar_path_tracing`). They follow
+   viewport resizes automatically.
 3. Builds the camera ray setup from `RenderSceneData::get_cam_transform()` and
    `get_cam_projection()`. That projection is reversed-Z and already contains Vulkan's y flip, so
    NDC y increases downwards in the shader.
-4. Dispatches `main.glsl` (8×8 groups) or traces rays with `main_hw.glsl`; both trace,
-   accumulate and write linear HDR radiance into the color buffer. Godot's tonemapping etc. happen afterwards, so the
-   `WorldEnvironment` tonemap settings now control the look.
+4. Runs three passes:
+   - **trace:** `main.glsl` (compute, 8×8 groups) or `main_hw.glsl` (ray tracing pipeline) traces
+     one path per pixel and writes this frame's color, primary albedo, G-buffer and motion.
+   - **resolve:** `resolve.glsl` reprojects and accumulates the history, then writes linear HDR
+     radiance into the color buffer.
+   - **denoise** (optional): `denoise.glsl` filters the accumulated image and overwrites the color
+     buffer.
+
+   Godot's tonemapping etc. happen afterwards, so the `WorldEnvironment` tonemap settings control
+   the look.
 
 Accumulation resets on camera, projection, settings, scene or resolution changes, or when
 `reset_accumulation()` is called. With `max_samples > 0` it stops tracing and just copies the
@@ -79,7 +90,8 @@ accumulated image each frame.
 
 Camera properties: `max_bounces`, `samples_per_pixel`, `accumulate`, `max_samples`,
 `firefly_clamp`, `debug_view` (None / Normals / Albedo / Traversal cost), sky gradient colors +
-`sky_energy`, `path_tracing_enabled`.
+`sky_energy`, `path_tracing_enabled`, `backend`, `temporal_reprojection`, `temporal_max_history`,
+`max_portal_hops`, `denoise`, `denoise_iterations`, `editor_preview`.
 
 Things to know:
 
@@ -89,7 +101,7 @@ Things to know:
 - Disable TAA/FSR on the viewport: they would reproject our image with the raster's motion vectors.
 - Only Forward+ (needs RenderingDevice and an `rgba16f` color buffer). XR multiview is not handled
   (view 0 only). Orthographic cameras are not handled.
-- The effect only runs at runtime, not in the editor viewport.
+- In the editor, nothing runs unless a camera's `editor_preview` is on (see below).
 
 ### Shader layout
 
@@ -97,7 +109,9 @@ Things to know:
 shaders/
   main.glsl        software entry point (compute): includes common, brdfs, trace_sw, integrator
   main_hw.glsl     hardware entry point: #[raygen] (same includes with trace_hw), #[miss], #[closest_hit]
-  integrator.glsli camera rays, path tracing loop, NEE + MIS, portals, temporal accumulation
+  integrator.glsli camera rays, path tracing loop, NEE + MIS, portals, motion vectors
+  resolve.glsl     temporal reprojection + accumulation (history, albedo, luminance moments)
+  denoise.glsl     spatial denoiser (variance estimate + a-trous iterations)
   common.glsli     structs/bindings (mirror of gpu_types.h + FrameData), RNG, helpers
   brdfs.glsli      Burley-ish diffuse + GGX (VNDF sampling), ShadingInfo
   trace_sw.glsli   software two-level BVH traversal: trace_closest() / trace_any()
@@ -179,27 +193,36 @@ On this machine Godot 4.7.2 reports `SUPPORTS_RAY_QUERY = false` but
   actually running. Auto prefers hardware. Hardware requested but unsupported warns once and
   falls back to software.
 
-### Software traversal and the NVIDIA driver
+### Software tracing kernel and the NVIDIA driver
 
-With separate 32-entry stacks for the TLAS and BLAS loops, the software shader sometimes lost the
-Vulkan device (`VkResult -4`) once the temporal code was added. It always happened on the same
-random path, at a frame that moved when unrelated code changed, even with every buffer index
-clamped and every loop bounded. That points at the driver's handling of the shader (local
-memory), not at an out-of-bounds access. Sharing one 32-entry stack between the TLAS and BLAS
-walks (BLAS entries are pushed above the pending TLAS entries) fixed it and uses half the local
-memory. If it ever comes back, smaller stacks or moving the temporal resolve into its own
-dispatch are the next things to try.
+The software kernel lost the Vulkan device (`VkResult -4`; the Windows event log shows nvlddmkm
+event 153, a GPU exception, not a 4101 timeout) whenever it grew past some size:
+
+- The first time was when the temporal code went into the kernel. It always happened on the same
+  random path, at a frame that moved when unrelated code changed, even with every buffer index
+  clamped and every loop bounded.
+- Sharing one 32-entry stack between the TLAS and BLAS walks (BLAS entries pushed above the
+  pending TLAS entries) hid it, until the denoiser outputs were added to the same kernel.
+
+The lasting fix was structural. The tracing kernel no longer reads any history: it only writes
+this frame's results, and accumulation lives in the small `resolve.glsl` pass. Since then the
+software path has run over 10,000 frames across all demos without a fault (and got slightly
+faster). Keep the tracing kernel lean; put new per-pixel work in a separate pass.
 
 ## Temporal accumulation
 
 The image is a per-pixel running mean (`history.a` = sample count) that is reprojected instead of
-reset when the camera or objects move:
+reset when the camera or objects move. The tracing pass writes the inputs and `resolve.glsl` does
+the rest:
 
 - The G-buffer stores the primary hit's normal and its distance from the camera (−1 for sky).
 - The primary hit is mapped back to last frame's world position through the instance's previous
   transform (`GpuInstance::prev_object_to_world`; `GeometryGroup3D` uploads once more after motion
   stops so it catches up), then projected with last frame's view-projection. Sky pixels reproject
   by direction only.
+- That screen motion is applied to the pixel centre, not to the jittered sample position.
+  Otherwise a static view resamples the history bilinearly by a sub-pixel offset every frame and
+  the converged image slowly blurs.
 - Bilinear taps are accepted when last frame's distance matches within 3% + 2 cm and the normals
   agree (dot > 0.8); sky only matches sky. Rejected history restarts at one sample.
 - While anything moves, the history length is capped at `temporal_max_history` (16) so lighting
@@ -208,8 +231,37 @@ reset when the camera or objects move:
 - `temporal_reprojection = false` restores plain accumulation (reset on any change). Settings,
   backend and resolution changes always reset.
 
-Not done: variance (neighbourhood) clamping against lag in indirect light, and a spatial filter.
-Light changes are only detected as "something changed" through the light buffer comparison.
+Alongside the color, the resolve accumulates the primary albedo and the mean of luminance² with
+the same weights, for the denoiser.
+
+Not done: variance (neighbourhood) clamping against lag in indirect light.
+
+## Spatial denoiser
+
+`denoise.glsl`, SVGF without its temporal half (the resolve pass already does that):
+
+1. **Prepare:** divide the accumulated color by the accumulated albedo (demodulation, so texture
+   detail is never blurred) and estimate the variance of the accumulated mean. That is
+   (E[l²] − E[l]²) / n from the moments; while a pixel has fewer than 4 samples, a 3×3 spatial
+   estimate is used instead.
+2. **Filter:** `denoise_iterations` (default 4) à-trous iterations of a 5×5 B3-spline kernel with
+   steps 1, 2, 4, 8 pixels. Each weight is stopped by:
+   - normals: dot^128;
+   - distance: relative to the local screen-space distance gradient, so slanted floors still
+     filter;
+   - illumination luminance: relative to sqrt of the 3×3-blurred variance.
+
+   Variance is propagated with the squared weights. The last iteration multiplies the albedo back
+   in and writes the color buffer.
+
+Because the luminance stop scales with the variance of the *accumulated* mean, the filter fades
+out as samples accumulate. A static view still converges to the unfiltered result: after 1,500
+frames the Cornell box differs by 0.3/255 from the undenoised image. The sky is not filtered.
+Debug views skip the denoiser. `denoise = false` (N in the demos) turns it off.
+
+Costs about 1.5 ms at 1080p with 4 iterations on the test GPU. Known weaknesses: some low-frequency
+blotching on large diffuse walls in the first frames after a change, and a softened look while
+the history cap (16) is active during motion.
 
 ## Portals
 
@@ -236,9 +288,17 @@ whose front faces +Z, with a `linked_portal` and a `tint`.
 
 - `demo/demo.tscn`: the Cornell box, with both Suzannes animated (`demo/animator.gd`).
 - `demo/lights_demo.tscn`: textured ground, sun + omni + spot, metal sphere, emissive lamp.
-- `demo/portal_demo.tscn`: two disconnected rooms linked by a portal pair; fly through it.
+- `demo/portal_demo.tscn`: a hall with three portal pairs:
+  - an endless corridor between the side walls (violet frames, slightly tinted so each recursion
+    is darker);
+  - a fall loop between a floor hole and the ceiling above it (gold frames);
+  - a door on the back wall that opens onto a sunlit garden far away, where it comes out of a
+    free-standing frame.
+
+  Fly through any of them. The scene is generated by `tools/gen_portal_demo.py` (edit the script,
+  not the `.tscn`).
 - Keys: WASD/QE move, wheel = speed, Esc = mouse capture, Space = pause animation, Tab = debug
-  view, B = cycle backend, T = toggle temporal reprojection.
+  view, B = cycle backend, T = toggle temporal reprojection, N = toggle the denoiser.
 - `demo/capture.gd` is a dev helper for scripted regression screenshots (opens a window):
 
 ```bash
@@ -247,13 +307,29 @@ Godot_v4.7.2-stable_win64_console.exe --path project --resolution 1280x720 -- --
 
   Extra flags: `--raster` (disable the path tracer for comparison), `--debug-view=N`, `--static`
   (freeze animations so accumulation converges), `--backend=0|1|2` (auto/software/hardware),
-  `--no-temporal`, `--pan` (sway the camera), `--walk` (portal demo: walk through portal A). It
-  prints the average frame time and the viewport's GPU time.
+  `--no-temporal`, `--no-denoise`, `--pan` (sway the camera), `--walk` (portal demo: walk forward
+  until through the garden door), `--camera=x,y,z,yaw,pitch` (degrees). It ignores the real mouse
+  and prints the average frame time and the viewport's GPU time.
+
+## Editor preview
+
+Tick `editor_preview` on a `PathTracingCamera` to path trace the editor's main 3D viewport, from
+the editor's own camera and with that camera's settings:
+
+- The effect goes on a fresh `Compositor` on the editor viewport's internal camera, so nothing is
+  written into the scene. Unticking it, deleting the camera or closing the scene removes it again.
+- The `GeometryGroup3D` builds on first use and then tracks transforms, visibility and lights
+  while the preview runs, so moving things in the editor updates live.
+- Mesh, material or node add/remove changes need the **Rebuild Scene** button in the camera's
+  Editor group.
+- While previewing, the editor's low-processor mode is switched off so accumulation keeps going;
+  the previous setting is restored afterwards.
+- Only viewport 1 of a split view is path traced.
+- Editor gizmos (grid, selection outlines) are painted over while the preview is on.
 
 ## Known limitations / follow-ups
 
-- Noise: 1 spp + white-noise PCG. Blue noise / Sobol and a spatial denoiser are the obvious next
-  steps; temporal reuse alone still looks grainy while things move.
+- Noise: 1 spp + white-noise PCG. Blue noise / Sobol sequences would help the denoiser most.
 - Many emissive triangles: NEE picks one triangle per bounce. Fine for the demos; ReSTIR DI or a
   light BVH would be needed for scenes with thousands of emitters.
 - Textures are resized into one `texture_resolution`² array without mipmaps (no ray cones), so
@@ -270,12 +346,13 @@ Godot_v4.7.2-stable_win64_console.exe --path project --resolution 1280x720 -- --
 
 ## Next steps
 
-1. **Spatial denoising.** SVGF-style à-trous on top of the temporal history, with albedo
-   demodulation and variance from history moments. The G-buffer already has normal + distance;
-   add albedo.
-2. **Variance clamping** in the temporal pass to reduce lag in indirect light.
-3. **Portal puzzle demo.** A player controller with collision that teleports via
+1. **Variance clamping** in the resolve pass to reduce lag in indirect light, and feeding the first
+   à-trous iteration back into the history (as SVGF does) for more stable motion.
+2. **Portal puzzle demo.** A player controller with collision that teleports via
    `Portal3D.is_crossing()`, plus moving portals (needs previous-frame portal transforms for
    reprojection).
-4. **NEE through portals** (for example, sampling lights in each portal's linked space) to cut the
-   noise of light that only reaches a room through a portal.
+3. **NEE through portals** (for example, sampling lights in each portal's linked space) to cut the
+   noise of light that only reaches a room through a portal; the garden light in the portal demo
+   is the obvious test case.
+4. **Editor preview polish:** draw gizmos on top, preview through any of the split viewports, and
+   rebuild automatically when the scene tree changes.

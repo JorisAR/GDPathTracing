@@ -11,7 +11,8 @@ using namespace godot;
 
 // A Camera3D that renders its view with the path tracer. At runtime it attaches a
 // PathTracingEffect to its Compositor (creating one if needed) and feeds it scene data from the
-// assigned GeometryGroup3D.
+// assigned GeometryGroup3D. In the editor, `editor_preview` path traces the editor's 3D viewport
+// with this camera's settings.
 class PathTracingCamera : public Camera3D
 {
     GDCLASS(PathTracingCamera, Camera3D);
@@ -73,19 +74,39 @@ class PathTracingCamera : public Camera3D
     void set_temporal_max_history(int value);
     int get_max_portal_hops() const;
     void set_max_portal_hops(int value);
+    bool get_denoise() const;
+    void set_denoise(bool value);
+    int get_denoise_iterations() const;
+    void set_denoise_iterations(int value);
     String get_active_backend() const;
 
     int get_sample_count() const;
     void reset_accumulation();
 
+    bool get_editor_preview() const;
+    void set_editor_preview(bool value);
+    Callable get_rebuild_scene_button();
+    void rebuild_scene();
+
   private:
     void setup();
     void push_settings();
+    GeometryGroup3D *resolve_group();
+    Ref<PathTracingEffect> create_effect();
+    void update_editor_preview();
+    void stop_editor_preview();
 
     GeometryGroup3D *geometry_group = nullptr;
     bool path_tracing_enabled = true;
     PT::RenderSettings settings;
     Ref<PathTracingEffect> effect;
+
+    // Editor preview state.
+    bool editor_preview = false;
+    bool preview_active = false;
+    ObjectID preview_camera;          // the editor viewport camera we attached to
+    ObjectID preview_group;           // the group we called begin_editor_preview() on
+    bool saved_low_processor_mode = true;
 };
 
 VARIANT_ENUM_CAST(PathTracingCamera::DebugView);
