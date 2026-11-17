@@ -1,11 +1,11 @@
-[gd_scene load_steps=17 format=3 uid="uid://dopxpjgtfffh4"]
+[gd_scene format=3 uid="uid://dopxpjgtfffh4"]
 
 [ext_resource type="Script" uid="uid://c0626baj7yc8l" path="res://demo/movable_camera.gd" id="2_kdd2p"]
 [ext_resource type="ArrayMesh" uid="uid://c8s1c6pob6ry1" path="res://demo/geometry/suzanne.obj" id="3_rovw5"]
 [ext_resource type="ArrayMesh" uid="uid://teo4lnhxisnh" path="res://demo/geometry/cornell.obj" id="4_5j87i"]
 [ext_resource type="Script" uid="uid://b7icuble3ehmr" path="res://demo/fps_meter.gd" id="4_w0fmn"]
-
-[sub_resource type="CompressedTexture2D" id="CompressedTexture2D_ewjki"]
+[ext_resource type="Script" path="res://demo/animator.gd" id="5_anim"]
+[ext_resource type="Script" path="res://demo/capture.gd" id="6_capt"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_tctin"]
 
@@ -15,6 +15,7 @@ sky_material = SubResource("ProceduralSkyMaterial_tctin")
 [sub_resource type="Environment" id="Environment_tn4qg"]
 background_mode = 2
 sky = SubResource("Sky_vgllt")
+tonemap_mode = 3
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_avnmi"]
 
@@ -46,22 +47,15 @@ roughness = 0.16
 
 [node name="Demo" type="Node3D"]
 
-[node name="Camera3D" type="PathTracingCamera" parent="." node_paths=PackedStringArray("output_texture", "geometry_group")]
-fov = 79.5
-output_texture = NodePath("OutputTexture")
+[node name="Camera3D" type="PathTracingCamera" parent="." node_paths=PackedStringArray("geometry_group")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 6.5)
+fov = 60.0
 geometry_group = NodePath("../GeometryGroup3D")
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 9.7694)
+max_bounces = 5
+firefly_clamp = 20.0
+sky_energy = 0.5
 script = ExtResource("2_kdd2p")
 move_speed = 2.0
-look_sensitivity = 0.01
-
-[node name="OutputTexture" type="TextureRect" parent="Camera3D"]
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-grow_horizontal = 2
-grow_vertical = 2
-texture = SubResource("CompressedTexture2D_ewjki")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_tn4qg")
@@ -86,13 +80,25 @@ surface_material_override/2 = SubResource("StandardMaterial3D_spnlb")
 transform = Transform3D(0.982635, -0.208021, 0.656626, 0.0853118, 1.17191, 0.243597, -0.68348, -0.152791, 0.974428, -1.16402, -1.55573, -0.923088)
 mesh = ExtResource("3_rovw5")
 surface_material_override/0 = SubResource("StandardMaterial3D_ykvhj")
+script = ExtResource("5_anim")
+spin_speed = Vector3(0, 0.5, 0)
+bob_amplitude = Vector3(0, 0.3, 0)
 
 [node name="Suzanne2" type="MeshInstance3D" parent="GeometryGroup3D"]
 transform = Transform3D(0.934979, 0.0872355, -0.747128, 0.0853118, 1.17191, 0.243597, 0.74735, -0.242915, 0.906899, 1.27032, -0.951083, -0.923088)
 mesh = ExtResource("3_rovw5")
 surface_material_override/0 = SubResource("StandardMaterial3D_j5lb4")
+script = ExtResource("5_anim")
+spin_speed = Vector3(0, -0.4, 0)
 
-[node name="Label" type="Label" parent="."]
-offset_right = 40.0
-offset_bottom = 23.0
+[node name="Label" type="Label" parent="." node_paths=PackedStringArray("camera", "geometry_group")]
+offset_left = 8.0
+offset_top = 8.0
+offset_right = 48.0
+offset_bottom = 31.0
 script = ExtResource("4_w0fmn")
+camera = NodePath("../Camera3D")
+geometry_group = NodePath("../GeometryGroup3D")
+
+[node name="Capture" type="Node" parent="."]
+script = ExtResource("6_capt")

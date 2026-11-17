@@ -1,0 +1,141 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://demo/movable_camera.gd" id="1_cam"]
+[ext_resource type="Script" path="res://demo/fps_meter.gd" id="2_fps"]
+[ext_resource type="Script" path="res://demo/animator.gd" id="3_anim"]
+[ext_resource type="Script" path="res://demo/capture.gd" id="4_capt"]
+[ext_resource type="Texture2D" path="res://demo/materials/grass_wales_diffuse.png" id="5_grass"]
+[ext_resource type="ArrayMesh" path="res://demo/geometry/suzanne.obj" id="6_suz"]
+
+[sub_resource type="Environment" id="Environment_1"]
+background_mode = 1
+background_color = Color(0.5, 0.65, 0.9, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.4, 0.45, 0.5, 1)
+tonemap_mode = 3
+
+[sub_resource type="StandardMaterial3D" id="Mat_grass"]
+albedo_texture = ExtResource("5_grass")
+uv1_scale = Vector3(8, 8, 8)
+
+[sub_resource type="PlaneMesh" id="Mesh_ground"]
+size = Vector2(30, 30)
+
+[sub_resource type="StandardMaterial3D" id="Mat_white"]
+albedo_color = Color(0.85, 0.85, 0.85, 1)
+roughness = 0.7
+
+[sub_resource type="StandardMaterial3D" id="Mat_orange"]
+albedo_color = Color(0.95, 0.45, 0.15, 1)
+roughness = 0.35
+
+[sub_resource type="StandardMaterial3D" id="Mat_gold"]
+albedo_color = Color(1, 0.78, 0.35, 1)
+metallic = 1.0
+roughness = 0.25
+
+[sub_resource type="StandardMaterial3D" id="Mat_lamp"]
+albedo_color = Color(0.1, 0.1, 0.1, 1)
+emission_enabled = true
+emission = Color(0.4, 0.8, 1, 1)
+emission_energy_multiplier = 6.0
+
+[sub_resource type="BoxMesh" id="Mesh_box"]
+
+[sub_resource type="BoxMesh" id="Mesh_wall"]
+size = Vector3(6, 3, 0.3)
+
+[sub_resource type="SphereMesh" id="Mesh_sphere"]
+
+[sub_resource type="BoxMesh" id="Mesh_lamp"]
+size = Vector3(0.2, 1.5, 0.2)
+
+[node name="LightsDemo" type="Node3D"]
+
+[node name="Camera3D" type="PathTracingCamera" parent="." node_paths=PackedStringArray("geometry_group")]
+transform = Transform3D(0.866025, -0.12941, 0.482963, 0, 0.965926, 0.258819, -0.5, -0.224144, 0.836516, 4.5, 2.2, 7)
+fov = 65.0
+geometry_group = NodePath("../GeometryGroup3D")
+max_bounces = 4
+firefly_clamp = 20.0
+sky_top_color = Color(0.35, 0.55, 0.95, 1)
+sky_horizon_color = Color(0.8, 0.88, 1, 1)
+ground_color = Color(0.25, 0.22, 0.2, 1)
+sky_energy = 0.6
+script = ExtResource("1_cam")
+move_speed = 4.0
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_1")
+
+[node name="GeometryGroup3D" type="GeometryGroup3D" parent="."]
+
+[node name="Sun" type="DirectionalLight3D" parent="GeometryGroup3D"]
+transform = Transform3D(0.866025, 0.25, -0.433013, 0, 0.866025, 0.5, 0.5, -0.433013, 0.75, 0, 6, 0)
+light_color = Color(1, 0.95, 0.85, 1)
+light_energy = 1.2
+light_angular_distance = 2.0
+shadow_enabled = true
+
+[node name="Omni" type="OmniLight3D" parent="GeometryGroup3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.5, 1.2, 1.5)
+light_color = Color(1, 0.5, 0.3, 1)
+light_energy = 3.0
+light_size = 0.1
+shadow_enabled = true
+omni_range = 8.0
+
+[node name="Spot" type="SpotLight3D" parent="GeometryGroup3D"]
+transform = Transform3D(1, 0, 0, 0, 0.258819, 0.965926, 0, -0.965926, 0.258819, 2.5, 3.5, 1)
+light_color = Color(0.6, 1, 0.6, 1)
+light_energy = 6.0
+shadow_enabled = true
+spot_range = 8.0
+spot_angle = 25.0
+
+[node name="Ground" type="MeshInstance3D" parent="GeometryGroup3D"]
+mesh = SubResource("Mesh_ground")
+surface_material_override/0 = SubResource("Mat_grass")
+
+[node name="Wall" type="MeshInstance3D" parent="GeometryGroup3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, -2)
+mesh = SubResource("Mesh_wall")
+surface_material_override/0 = SubResource("Mat_white")
+
+[node name="Box" type="MeshInstance3D" parent="GeometryGroup3D"]
+transform = Transform3D(0.707107, 0, 0.707107, 0, 1, 0, -0.707107, 0, 0.707107, -1, 0.5, 0)
+mesh = SubResource("Mesh_box")
+surface_material_override/0 = SubResource("Mat_orange")
+script = ExtResource("3_anim")
+spin_speed = Vector3(0, 0.5, 0)
+
+[node name="Sphere" type="MeshInstance3D" parent="GeometryGroup3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.2, 0.5, 0.5)
+mesh = SubResource("Mesh_sphere")
+surface_material_override/0 = SubResource("Mat_gold")
+script = ExtResource("3_anim")
+spin_speed = Vector3(0, 0, 0)
+bob_amplitude = Vector3(0, 0.4, 0)
+bob_speed = 1.5
+
+[node name="Suzanne" type="MeshInstance3D" parent="GeometryGroup3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 1.2, -1.2)
+mesh = ExtResource("6_suz")
+surface_material_override/0 = SubResource("Mat_white")
+
+[node name="Lamp" type="MeshInstance3D" parent="GeometryGroup3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.5, 0.75, -1.5)
+mesh = SubResource("Mesh_lamp")
+surface_material_override/0 = SubResource("Mat_lamp")
+
+[node name="Label" type="Label" parent="." node_paths=PackedStringArray("camera", "geometry_group")]
+offset_left = 8.0
+offset_top = 8.0
+offset_right = 48.0
+offset_bottom = 31.0
+script = ExtResource("2_fps")
+camera = NodePath("../Camera3D")
+geometry_group = NodePath("../GeometryGroup3D")
+
+[node name="Capture" type="Node" parent="."]
+script = ExtResource("4_capt")
