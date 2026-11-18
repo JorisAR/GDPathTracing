@@ -1,0 +1,475 @@
+// ReSTIR GI (Ouyang et al. 2021) with compatibility-guided spatial neighbour selection
+// (Junkins et al. 2026, "Compatibility-Guided Neighbor Selection for ReSTIR").
+//
+// The trace pass splits every directly visible primary hit x1 into direct light (kept in the
+// frame color) and one GI sample: the secondary hit x2, its normal, the radiance leaving x2
+// towards x1 and the pdf it was sampled with. This pass runs twice per frame:
+//
+//   RESTIR_TEMPORAL  the pixel's new sample becomes a reservoir and is merged with last frame's
+//                    final (spatially resampled) reservoir at the reprojected pixel, confidence M
+//                    capped. The result goes to a scratch reservoir for the spatial pass.
+//   RESTIR_SPATIAL   picks `neighbors` pixels among `candidates` random pixels in a `radius` disk,
+//                    with probability proportional to the paper's G-buffer compatibility
+//                    h = exp(-|x-y|/s) * max(n_x . n_y, 0)^beta (weighted reservoir sampling, early
+//                    stop once more than `neighbors` candidates score h > 0.5). Their samples are
+//                    reconnected to this pixel's x1 (reconnection shift, plus a visibility ray) and
+//                    resampled with generalized balance heuristic MIS weights evaluated in area
+//                    measure at x2, so the shift Jacobians cancel. Then the chosen sample is shaded
+//                    at x1 and added to the frame color, and the reservoir is kept for next frame's
+//                    temporal pass.
+//
+// Target function: luminance of brdf(x1) * cos * L(x2 -> x1). Requires common, brdfs, a trace_*
+// include and integrator.glsli (with RESTIR_PASS defined) first.
+
+#define RESTIR_TEMPORAL 0u
+#define RESTIR_SPATIAL 1u
+#define RESTIR_DI_TEMPORAL 2u // restir_di.glsli
+#define RESTIR_DI_SPATIAL 3u
+#define RESTIR_FLAG_TEMPORAL 1u // last frame's reservoirs are valid
+#define RESTIR_FLAG_UNIFORM 2u  // baseline neighbour selection (Bitterli et al. 2020) instead of the paper's
+
+// A uniform buffer rather than push constants: Godot 4.7's ray tracing pipeline layout does not
+// expose push constants to the raygen stage (the pipeline fails validation and never runs).
+layout(set = 0, binding = 12, std140) uniform RestirParams {
+    uint mode;
+    uint flags;
+    int candidates;       // K
+    int neighbors;        // M (1..2)
+    float radius;         // R, pixels
+    float omega;          // heuristic solid angle
+    float beta;           // heuristic normal exponent
+    float max_confidence; // temporal M cap
+    int di_candidates;    // ReSTIR DI: initial light samples per pixel
+    int pad0;
+    int pad1;
+    int pad2;
+} rp;
+
+layout(set = 0, binding = 1, rgba32f) uniform restrict image2D frame_color;
+layout(set = 0, binding = 2, rgba32f) uniform restrict readonly image2D frame_motion;
+layout(set = 0, binding = 3, rgba32f) uniform restrict readonly image2D gbuffer_cur;
+layout(set = 0, binding = 4, rgba32f) uniform restrict readonly image2D gbuffer_prev;
+layout(set = 0, binding = 5, rgba32f) uniform restrict readonly image2D gi_hit; // x1, packed geometric normal (w < 0: none)
+layout(set = 0, binding = 6, rgba32f) uniform restrict readonly image2D gi_sample;
+layout(set = 0, binding = 7, rgba32f) uniform restrict readonly image2D gi_radiance;
+// Reservoirs: a = xyz x2, w W; b = rgb radiance, w normal + M.
+layout(set = 0, binding = 8, rgba32f) uniform restrict readonly image2D res_prev_a;  // last frame's final
+layout(set = 0, binding = 9, rgba32f) uniform restrict readonly image2D res_prev_b;
+layout(set = 0, binding = 10, rgba32f) uniform restrict image2D res_temp_a;         // temporal -> spatial
+layout(set = 0, binding = 11, rgba32f) uniform restrict image2D res_temp_b;
+layout(set = 0, binding = 13, rgba32f) uniform restrict writeonly image2D res_out_a; // this frame's final
+layout(set = 0, binding = 14, rgba32f) uniform restrict writeonly image2D res_out_b;
+layout(set = 0, binding = 23, rgba32ui) uniform restrict readonly uimage2D surface_in; // see common.glsli
+
+#define MAX_NEIGHBORS 2 // the visibility-aware MIS needs O(n^2) rays and per-domain state; the paper uses 1
+#define DOMAINS (MAX_NEIGHBORS + 1)
+
+struct Reservoir {
+    vec3 x2;
+    vec3 n2;
+    vec3 radiance;
+    float W; // unbiased contribution weight; 0 = no sample
+    float M; // confidence
+};
+
+Reservoir empty_reservoir() {
+    Reservoir r;
+    r.x2 = vec3(0.0);
+    r.n2 = vec3(0.0, 1.0, 0.0);
+    r.radiance = vec3(0.0);
+    r.W = 0.0;
+    r.M = 0.0;
+    return r;
+}
+
+// Normal (2 x 8-bit octahedral, only used for the reconnection cosine) and M (8 bits) as an
+// integer-valued float (24 bits, exact). See pack_normal() on why not to bit-cast.
+float pack_normal_m(vec3 n, float m) {
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    vec2 e = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    uvec2 q = uvec2(round(clamp(e * 0.5 + 0.5, 0.0, 1.0) * 255.0));
+    return float((q.x << 16u) | (q.y << 8u) | uint(clamp(round(m), 0.0, 255.0)));
+}
+
+void unpack_normal_m(float f, out vec3 n, out float m) {
+    uint u = uint(max(f, 0.0));
+    vec2 e = vec2(float((u >> 16u) & 255u), float((u >> 8u) & 255u)) / 255.0 * 2.0 - 1.0;
+    n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    n = normalize(n);
+    m = float(u & 255u);
+}
+
+Reservoir load_reservoir(vec4 a, vec4 b) {
+    Reservoir r;
+    r.x2 = a.xyz;
+    r.W = a.w;
+    r.radiance = b.rgb;
+    unpack_normal_m(b.w, r.n2, r.M);
+    if (!(r.W >= 0.0) || isinf(r.W)) r.W = 0.0; // NaN guard
+    return r;
+}
+
+void store_temporal(ivec2 p, Reservoir r) {
+    imageStore(res_temp_a, p, vec4(r.x2, r.W));
+    imageStore(res_temp_b, p, vec4(r.radiance, pack_normal_m(r.n2, r.M)));
+}
+
+void store_final(ivec2 p, Reservoir r) {
+    imageStore(res_out_a, p, vec4(r.x2, r.W));
+    imageStore(res_out_b, p, vec4(r.radiance, pack_normal_m(r.n2, r.M)));
+}
+
+bool inside(ivec2 p) {
+    return all(greaterThanEqual(p, ivec2(0))) && all(lessThan(p, frame.size));
+}
+
+// Shading at pixel p's primary hit, from what the trace pass stored: position and geometric normal
+// (gi_hit), the shading normal (G-buffer) and the material (surface image). Emission and area are
+// not needed here.
+bool load_surface(ivec2 p, out ShadingInfo s) {
+    vec4 h = imageLoad(gi_hit, p);
+    if (h.w < 0.0) return false;
+    s.position = h.xyz;
+    s.out_dir = normalize(frame.cam_to_world[3].xyz - s.position);
+    s.geo_normal = unpack_normal(h.w);
+    s.normal = imageLoad(gbuffer_cur, p).xyz;
+    s.lambert_out = max(dot(s.normal, s.out_dir), 1e-4);
+    uvec4 m = imageLoad(surface_in, p);
+    vec2 a = unpackHalf2x16(m.x);
+    vec2 b = unpackHalf2x16(m.y);
+    vec2 c = unpackHalf2x16(m.z);
+    vec2 d = unpackHalf2x16(m.w);
+    s.diffuse_albedo = vec3(a, b.x);
+    s.roughness = b.y;
+    s.fresnel_0 = vec3(c, d.x);
+    s.emission = vec3(0.0);
+    s.emission_luminance = 0.0;
+    s.area = 0.0;
+    return true;
+}
+
+// Target function at x1 for a sample at x2 with radiance `radiance`; `f` is the shaded value.
+float target(const ShadingInfo s, vec3 x2, vec3 radiance, out vec3 f) {
+    f = vec3(0.0);
+    vec3 d = x2 - s.position;
+    float dist = length(d);
+    if (dist < 1e-6) return 0.0;
+    vec3 wi = d / dist;
+    float c = dot(s.normal, wi);
+    if (c <= 0.0 || dot(s.geo_normal, wi) <= 0.0) return 0.0;
+    f = brdf(s, wi) * c * radiance;
+    return luminance(f);
+}
+
+bool visible(vec3 from, vec3 n_from, vec3 to) {
+    vec3 d = to - from;
+    float dist = length(d);
+    if (dist < 1e-5) return false;
+    Ray r;
+    r.d = d / dist;
+    float scale = 1e-4 * max(1.0, max(max(abs(from.x), abs(from.y)), abs(from.z)));
+    r.o = from + n_from * (dot(r.d, n_from) >= 0.0 ? scale : -scale);
+    return !occluded(r, dist * (1.0 - 1e-3));
+}
+
+// ---- paper's neighbour selection (Algorithm 1) ----
+
+vec3 pixel_hit_position(ivec2 p, float d) {
+    vec2 ndc = (vec2(p) + 0.5) / vec2(frame.size) * 2.0 - 1.0;
+    vec4 v = frame.inv_projection * vec4(ndc, 0.5, 1.0);
+    return mat3(frame.cam_to_world) * normalize(v.xyz / v.w) * d; // camera relative
+}
+
+float compatibility(vec3 x, vec3 nx, float dx, vec3 y, vec3 ny) {
+    float s = sqrt(rp.omega / M_PI) * dx;
+    return exp(-length(x - y) / max(s, 1e-6)) * pow(max(dot(nx, ny), 0.0), rp.beta);
+}
+
+vec2 r2_sequence(uint i) {
+    return fract(vec2(0.7548776662466927, 0.5698402909980532) * float(i) + 0.5);
+}
+
+vec2 concentric_disk(vec2 u) {
+    u = u * 2.0 - 1.0;
+    if (u.x == 0.0 && u.y == 0.0) return vec2(0.0);
+    float r, phi;
+    if (abs(u.x) > abs(u.y)) {
+        r = u.x;
+        phi = (M_PI / 4.0) * (u.y / u.x);
+    } else {
+        r = u.y;
+        phi = (M_PI / 2.0) - (M_PI / 4.0) * (u.x / u.y);
+    }
+    return r * vec2(cos(phi), sin(phi));
+}
+
+// Neighbour selection writes fixed slots and returns a mask of the valid ones: arrays indexed with
+// run-time values live in scratch memory, which in a ray tracing pipeline is the (slow) ray stack.
+// The code below assumes MAX_NEIGHBORS == 2.
+
+// Baseline: M uniform disk samples, kept if they pass the binary test of the paper's eq. 7.
+uint select_neighbors_uniform(ivec2 pos, vec4 g, inout uint rng, out ivec2 chosen[MAX_NEIGHBORS]) {
+    int want = clamp(rp.neighbors, 1, MAX_NEIGHBORS);
+    uint mask = 0u;
+    [[unroll]] for (int k = 0; k < MAX_NEIGHBORS; k++) {
+        chosen[k] = pos;
+        if (k >= want) continue;
+        ivec2 q = pos + ivec2(round(sample_disk(rand2(rng)) * rp.radius));
+        if (!inside(q) || q == pos) continue;
+        vec4 gq = imageLoad(gbuffer_cur, q);
+        if (gq.w < 0.0 || dot(g.xyz, gq.xyz) < 0.5 || abs(gq.w - g.w) / g.w >= 0.1) continue;
+        chosen[k] = q;
+        mask |= 1u << uint(k);
+    }
+    return mask;
+}
+
+// The paper's selection: A-ES weighted sampling without replacement (A-Chao behaviour for one
+// neighbour) over `candidates` R2 points in the disk, weighted by the compatibility heuristic.
+uint select_neighbors(ivec2 pos, vec4 g, inout uint rng, out ivec2 chosen[MAX_NEIGHBORS]) {
+    if ((rp.flags & RESTIR_FLAG_UNIFORM) != 0u) return select_neighbors_uniform(pos, g, rng, chosen);
+    const bool two = rp.neighbors >= 2;
+    float key0 = -1.0, key1 = -1.0;
+    ivec2 q0 = pos, q1 = pos;
+    vec3 x = pixel_hit_position(pos, g.w);
+    uint start = pcg_hash(uint(pos.x) * 9781u + uint(pos.y) * 6271u + frame.frame_index) & 0xFFFFu;
+    int good = 0;
+    for (int k = 0; k < rp.candidates; k++) {
+        ivec2 q = pos + ivec2(round(concentric_disk(r2_sequence(start + uint(k))) * rp.radius));
+        if (!inside(q) || q == pos) continue;
+        vec4 gq = imageLoad(gbuffer_cur, q);
+        if (gq.w < 0.0) continue;
+        float h = compatibility(x, g.xyz, g.w, pixel_hit_position(q, gq.w), gq.xyz);
+        if (h <= 1e-4) continue;
+        float key = pow(max(rand(rng), 1e-7), 1.0 / h);
+        // Replace the smallest key if this one is larger.
+        if (two && key1 < key0) {
+            if (key > key1) {
+                key1 = key;
+                q1 = q;
+            }
+        } else if (key > key0) {
+            key0 = key;
+            q0 = q;
+        }
+        if (h > 0.5 && ++good > (two ? 2 : 1)) break; // early stopping (Section 5)
+    }
+    chosen[0] = q0;
+    chosen[1] = q1;
+    return (key0 >= 0.0 ? 1u : 0u) | (key1 >= 0.0 ? 2u : 0u);
+}
+
+// ---- passes ----
+
+void restir_temporal(ivec2 pos) {
+    uint rng = pcg_hash(uint(pos.x) + pcg_hash(uint(pos.y) + pcg_hash(frame.frame_index ^ 0x5bd1e995u)));
+    ShadingInfo s;
+    if (!load_surface(pos, s)) {
+        store_temporal(pos, empty_reservoir());
+        return;
+    }
+
+    // Canonical candidate: this frame's sample, W = 1 / pdf, M = 1.
+    Reservoir r = empty_reservoir();
+    r.M = 1.0;
+    float w_sum = 0.0;
+    float p_chosen = 0.0;
+    vec4 smp = imageLoad(gi_sample, pos);
+    if (smp.w > 0.0) {
+        vec4 rad = imageLoad(gi_radiance, pos);
+        vec3 f;
+        float p = target(s, smp.xyz, rad.rgb, f);
+        if (p > 0.0) {
+            w_sum = p / smp.w;
+            p_chosen = p;
+            r.x2 = smp.xyz;
+            r.n2 = unpack_normal(rad.w);
+            r.radiance = rad.rgb;
+        }
+    }
+
+    // Temporal candidate at the reprojected pixel, accepted with the resolve pass's surface test.
+    if ((rp.flags & RESTIR_FLAG_TEMPORAL) != 0u) {
+        vec4 mo = imageLoad(frame_motion, pos);
+        if (mo.w > 0.0 && mo.z > 0.0) {
+            ivec2 q = ivec2(floor(mo.xy + 0.5));
+            if (inside(q)) {
+                vec4 gp = imageLoad(gbuffer_prev, q);
+                vec4 gc = imageLoad(gbuffer_cur, pos);
+                if (gp.w > 0.0 && abs(gp.w - mo.z) < 0.03 * mo.z + 0.02 && dot(gp.xyz, gc.xyz) > 0.8) {
+                    Reservoir pr = load_reservoir(imageLoad(res_prev_a, q), imageLoad(res_prev_b, q));
+                    pr.M = min(pr.M, rp.max_confidence);
+                    if (pr.M > 0.0) {
+                        vec3 f;
+                        float p = pr.W > 0.0 ? target(s, pr.x2, pr.radiance, f) : 0.0;
+                        float w = p * pr.W * pr.M;
+                        r.M += pr.M;
+                        if (w > 0.0) {
+                            w_sum += w;
+                            if (rand(rng) * w_sum < w) {
+                                r.x2 = pr.x2;
+                                r.n2 = pr.n2;
+                                r.radiance = pr.radiance;
+                                p_chosen = p;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    r.W = p_chosen > 0.0 ? w_sum / (r.M * p_chosen) : 0.0;
+    store_temporal(pos, r);
+}
+
+// Area-measure geometry factor at x2 for a reconnection from x1: |cos at x2| / distance^2.
+// Converts solid angle densities at x1 to area densities at x2, which every domain shares.
+float area_factor(vec3 x1, vec3 x2, vec3 n2) {
+    vec3 d = x1 - x2;
+    float l2 = dot(d, d);
+    if (l2 < 1e-12) return 0.0;
+    return abs(dot(n2, d)) * inversesqrt(l2) / l2;
+}
+
+// Target function of domain `s` for a sample at x2, in area measure at x2 (no visibility).
+float target_area(const ShadingInfo s, vec3 x2, vec3 n2, vec3 radiance) {
+    vec3 f;
+    return target(s, x2, radiance, f) * area_factor(s.position, x2, n2);
+}
+
+// Spatial domains: 0 is this pixel (canonical), 1.. the neighbour slots. Returns a mask of the
+// domains that have a surface to reuse at (bit 0 is always set).
+uint spatial_domains(ivec2 pos, inout uint rng, out ivec2 dom[DOMAINS]) {
+    ivec2 nbr[MAX_NEIGHBORS];
+    uint selected = rp.neighbors > 0 ? select_neighbors(pos, imageLoad(gbuffer_cur, pos), rng, nbr) : 0u;
+    dom[0] = pos;
+    uint valid = 1u;
+    [[unroll]] for (int i = 0; i < MAX_NEIGHBORS; i++) {
+        dom[i + 1] = (selected & (1u << uint(i))) != 0u ? nbr[i] : pos;
+        if ((selected & (1u << uint(i))) != 0u && imageLoad(gi_hit, dom[i + 1]).w >= 0.0)
+            valid |= 2u << uint(i);
+    }
+    return valid;
+}
+
+#define DOMAIN_VALID(mask, i) (((mask) & (1u << uint(i))) != 0u)
+// Visibility of sample j from domain l, as bit j * DOMAINS + l (set = visible).
+#define VIS_BIT(j, l) (1u << uint((j) * DOMAINS + (l)))
+
+// The visibility rays of the generalized balance heuristic, traced before the resampling. In a
+// ray tracing pipeline, everything live across traceRayEXT is spilled to the ray stack, so each ray
+// rebuilds its inputs from the (cached) images and only the bit mask survives.
+uint gi_spatial_visibility(const ivec2 dom[DOMAINS], uint valid) {
+    uint vis = 0u;
+    [[unroll]] for (int j = 0; j < DOMAINS; j++) {
+        [[unroll]] for (int l = 0; l < DOMAINS; l++) {
+            if (l == j || !DOMAIN_VALID(valid, j) || !DOMAIN_VALID(valid, l)) continue;
+            Reservoir r = load_reservoir(imageLoad(res_temp_a, dom[j]), imageLoad(res_temp_b, dom[j]));
+            if (r.M <= 0.0 || r.W <= 0.0) continue;
+            ShadingInfo sl;
+            load_surface(dom[l], sl);
+            if (target_area(sl, r.x2, r.n2, r.radiance) <= 0.0) continue;
+            if (visible(sl.position, sl.geo_normal, r.x2)) vis |= VIS_BIT(j, l);
+        }
+    }
+    return vis;
+}
+
+void restir_spatial(ivec2 pos) {
+    if (imageLoad(gi_hit, pos).w < 0.0) { // no GI sample here: the frame color is already complete
+        store_final(pos, empty_reservoir());
+        return;
+    }
+    uint rng = pcg_hash(uint(pos.x) + pcg_hash(uint(pos.y) + pcg_hash(frame.frame_index ^ 0x27d4eb2fu)));
+    ivec2 dom[DOMAINS];
+    const uint valid = spatial_domains(pos, rng, dom);
+    const uint vis = gi_spatial_visibility(dom, valid);
+
+    ShadingInfo shading[DOMAINS];
+    Reservoir res[DOMAINS];
+    [[unroll]] for (int i = 0; i < DOMAINS; i++) {
+        res[i] = empty_reservoir();
+        if (!DOMAIN_VALID(valid, i)) continue;
+        load_surface(dom[i], shading[i]);
+        res[i] = load_reservoir(imageLoad(res_temp_a, dom[i]), imageLoad(res_temp_b, dom[i]));
+    }
+
+    // Resampling with the generalized balance heuristic over all domains:
+    //   m_j(y) = M_j p_j(y) / sum_l M_l p_l(y),   w_j = m_j(y_j) p_0(y_j) W_j
+    // with every p in area measure at x2, so the reconnection Jacobians cancel. Only the target at
+    // this pixel includes visibility (one ray per neighbour sample).
+    float w_sum = 0.0;
+    float m_total = 0.0;
+    int chosen = -1;
+    float p_chosen = 0.0;
+    [[unroll]] for (int j = 0; j < DOMAINS; j++) {
+        m_total += res[j].M;
+        if (!DOMAIN_VALID(valid, j) || res[j].W <= 0.0) continue;
+        vec3 x2 = res[j].x2;
+        vec3 n2 = res[j].n2;
+        vec3 lo = res[j].radiance;
+        float own = target_area(shading[j], x2, n2, lo);
+        if (own <= 0.0) continue;
+        // Visibility is part of every domain's target here: leaving it out of the denominators
+        // gives occluded domains weight that no candidate makes up for (darkens corners).
+        float denom = 0.0;
+        float p0 = 0.0;
+        [[unroll]] for (int l = 0; l < DOMAINS; l++) {
+            if (!DOMAIN_VALID(valid, l)) continue;
+            float p = l == j ? own : target_area(shading[l], x2, n2, lo);
+            if (l != j && (vis & VIS_BIT(j, l)) == 0u) p = 0.0;
+            if (l == 0) p0 = p;
+            denom += res[l].M * p;
+        }
+        if (p0 <= 0.0 || denom <= 0.0) continue;
+        float m = res[j].M * own / denom;
+        float w_area = res[j].W / area_factor(shading[j].position, x2, n2); // W in area measure
+        float w = m * p0 * w_area;
+        if (!(w > 0.0) || isinf(w)) continue;
+        w_sum += w;
+        if (rand(rng) * w_sum < w) {
+            chosen = j;
+            p_chosen = p0;
+        }
+    }
+
+    Reservoir out_r = empty_reservoir();
+    out_r.M = m_total;
+    if (chosen < 0) {
+        store_final(pos, out_r);
+        return;
+    }
+    out_r.x2 = res[chosen].x2;
+    out_r.n2 = res[chosen].n2;
+    out_r.radiance = res[chosen].radiance;
+    // Back to a solid angle UCW at this pixel's x1.
+    out_r.W = w_sum / p_chosen * area_factor(shading[0].position, out_r.x2, out_r.n2);
+    store_final(pos, out_r);
+
+    vec3 f;
+    target(shading[0], out_r.x2, out_r.radiance, f);
+    vec3 gi = clamp_contribution(f * out_r.W, 1u);
+    if (any(isnan(gi)) || any(isinf(gi))) return;
+    vec4 c = imageLoad(frame_color, pos);
+    imageStore(frame_color, pos, vec4(c.rgb + gi, c.a));
+}
+
+void restir_di_temporal(ivec2 pos); // restir_di.glsli
+void restir_di_spatial(ivec2 pos);
+
+// Each pass is its own shader version (RESTIR_MODE, see #[versions] in restir*.glsl), so a ray
+// tracing pipeline only pays the registers and ray tracing stack of the pass it runs.
+void restir_main(ivec2 pos) {
+    if (!inside(pos)) return;
+#if RESTIR_MODE == 0
+    restir_temporal(pos);
+#elif RESTIR_MODE == 1
+    restir_spatial(pos);
+#elif RESTIR_MODE == 2
+    restir_di_temporal(pos);
+#else
+    restir_di_spatial(pos);
+#endif
+}

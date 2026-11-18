@@ -16,7 +16,8 @@ bool trace_closest(const Ray r, const float t_max, out Hit hit) {
     if (frame.instance_count == 0u) return false;
 
     payload.hit = 0u;
-    traceRayEXT(scene_tlas, gl_RayFlagsOpaqueEXT, 0xFF, 0, 0, 0, r.o, 0.0, r.d, t_max, 0);
+    // No opaque flag: alpha tested BLASes are non-opaque and run the any-hit shader.
+    traceRayEXT(scene_tlas, gl_RayFlagsNoneEXT, 0xFF, 0, 0, 0, r.o, 0.0, r.d, t_max, 0);
     if (payload.hit == 0u) return false;
 
     hit.t = payload.t;
@@ -32,7 +33,7 @@ bool trace_any(const Ray r, const float t_max) {
     // Skip the closest-hit shader: the payload keeps hit = 1 unless the miss shader runs.
     payload.hit = 1u;
     traceRayEXT(scene_tlas,
-                gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
                 0xFF, 0, 0, 0, r.o, 0.0, r.d, t_max, 0);
     return payload.hit != 0u;
 }

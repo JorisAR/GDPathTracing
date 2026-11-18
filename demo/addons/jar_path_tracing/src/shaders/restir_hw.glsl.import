@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://8yx68yjlou7i"
+path="res://.godot/imported/restir_hw.glsl-69778da4980dabf5b5581db5d24d3b31.res"
+
+[deps]
+
+source_file="res://addons/jar_path_tracing/src/shaders/restir_hw.glsl"
+dest_files=["res://.godot/imported/restir_hw.glsl-69778da4980dabf5b5581db5d24d3b31.res"]
+
+[params]
+

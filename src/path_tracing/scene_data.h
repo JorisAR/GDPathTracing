@@ -33,10 +33,12 @@ struct SceneSnapshot
     godot::PackedByteArray triangle_data;
     godot::PackedByteArray materials;
     godot::PackedByteArray instance_materials;
-    std::vector<godot::Ref<godot::Image>> textures; // RGBA8, all texture_resolution^2
+    std::vector<godot::Ref<godot::Image>> textures;      // RGBA8 sRGB colors, all texture_resolution^2
+    std::vector<godot::Ref<godot::Image>> data_textures; // RGBA8 linear (roughness, metallic, normals)
     int texture_resolution = 1;
     // Per mesh, triangle soup positions (3 x float3 per triangle) in BVH order, for hardware BLASes.
     std::vector<godot::PackedByteArray> blas_vertices;
+    std::vector<bool> blas_opaque; // per mesh: no alpha tested triangles (hardware: opaque geometry)
 
     // Dynamic data: changes whenever an instance or light moves / toggles visibility.
     uint64_t instance_version = 0;

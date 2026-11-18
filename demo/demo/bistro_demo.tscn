@@ -1,0 +1,52 @@
+[gd_scene format=3 uid="uid://x26ne3et87h0"]
+
+[ext_resource type="Script" uid="uid://c0626baj7yc8l" path="res://demo/movable_camera.gd" id="1_cam"]
+[ext_resource type="Script" uid="uid://b7icuble3ehmr" path="res://demo/fps_meter.gd" id="2_fps"]
+[ext_resource type="Script" uid="uid://c6uf10upvr1ux" path="res://demo/capture.gd" id="3_capt"]
+[ext_resource type="Script" uid="uid://cmvydlhj33p27" path="res://demo/bistro_setup.gd" id="4_setup"]
+[ext_resource type="PackedScene" uid="uid://bftfl22yslmpp" path="res://bistro/BistroExterior.fbx" id="5_bistro"]
+[ext_resource type="Texture2D" uid="uid://bede0xfm3ep82" path="res://bistro/san_giuseppe_bridge_4k.hdr" id="6_env"]
+
+[sub_resource type="Environment" id="Environment_1"]
+background_mode = 1
+background_color = Color(0.5, 0.65, 0.9, 1)
+tonemap_mode = 3
+
+[node name="BistroDemo" type="Node3D" unique_id=792284797]
+
+[node name="Setup" type="Node" parent="." unique_id=950644198]
+script = ExtResource("4_setup")
+use_fbx_lights = true
+fbx_light_energy = 3.0
+emission_scale = 1.0
+
+[node name="Camera3D" type="PathTracingCamera" parent="." unique_id=927442660 node_paths=PackedStringArray("geometry_group")]
+geometry_group = NodePath("../GeometryGroup3D")
+firefly_clamp = 20.0
+environment_map = ExtResource("6_env")
+environment_energy = 10.0
+transform = Transform3D(-0.656059, 0, 0.75471, 0.065777, 0.996195, 0.057179, -0.751838, 0.087156, -0.653563, 10, 3, 10)
+fov = 70.0
+script = ExtResource("1_cam")
+move_speed = 3.0
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1003249064]
+environment = SubResource("Environment_1")
+
+[node name="GeometryGroup3D" type="GeometryGroup3D" parent="." unique_id=1720119056]
+directx_normal_maps = true
+process_priority = 1000
+
+[node name="BistroExterior" parent="GeometryGroup3D" unique_id=501297453 instance=ExtResource("5_bistro")]
+
+[node name="Label" type="Label" parent="." unique_id=865287210 node_paths=PackedStringArray("camera", "geometry_group")]
+offset_left = 8.0
+offset_top = 8.0
+offset_right = 48.0
+offset_bottom = 31.0
+script = ExtResource("2_fps")
+camera = NodePath("../Camera3D")
+geometry_group = NodePath("../GeometryGroup3D")
+
+[node name="Capture" type="Node" parent="." unique_id=1021323867]
+script = ExtResource("3_capt")

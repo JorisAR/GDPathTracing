@@ -11,6 +11,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 #define FLAG_REPROJECT 1u // reproject the history (otherwise read it at the same pixel)
 #define FLAG_COPY_ONLY 2u // nothing was traced this frame: just present the history
 #define FLAG_RESET 4u     // discard the history
+#define FLAG_STATIC 8u    // nothing moved for a while: keep the history at the same pixel, no surface test
 
 layout(push_constant, std430) uniform Params {
     ivec2 size;
@@ -37,7 +38,10 @@ float luminance(vec3 c) {
 vec4 fetch_history(ivec2 pos, out vec4 aux) {
     aux = vec4(0.0);
     if ((params.flags & FLAG_RESET) != 0u) return vec4(0.0);
-    if ((params.flags & FLAG_REPROJECT) == 0u) {
+    // Static view: the history is this pixel's. No surface test, because with jittered camera rays an
+    // edge pixel sees different surfaces from frame to frame; rejecting those would restart it every
+    // frame and leave single-sample speckles along every edge.
+    if ((params.flags & (FLAG_REPROJECT | FLAG_STATIC)) != FLAG_REPROJECT) {
         aux = imageLoad(aux_in, pos);
         return imageLoad(history_in, pos);
     }

@@ -1,0 +1,335 @@
+// ReSTIR DI (Bitterli et al. 2020) for emissive triangles and the environment map, at directly
+// visible primary hits x1. Punctual lights stay with plain NEE in the integrator.
+//
+// A light sample is either a point on an emitter (target and densities in area measure) or a
+// direction of the environment (solid angle). Reusing a sample at another pixel keeps the light
+// point / direction fixed, so no shift Jacobian is needed in either measure.
+//
+//   RESTIR_DI_TEMPORAL  initial candidates: `di_candidates` light samples (emitter by power, or
+//                       the environment by luminance) plus the BSDF ray's hit if it found a light,
+//                       combined with the balance heuristic over the two strategies. The chosen
+//                       sample gets a shadow ray (visibility reuse) and is merged with last frame's
+//                       final reservoir at the reprojected pixel (1/M weights, M capped).
+//   RESTIR_DI_SPATIAL   the same compatibility-guided neighbour selection and visibility-aware
+//                       generalized balance heuristic as GI, then a shadow ray and shading.
+//
+// Requires restir.glsli (and everything it requires) first.
+
+layout(set = 0, binding = 15, rgba32f) uniform restrict readonly image2D di_hit_a; // see common.glsli
+layout(set = 0, binding = 16, rgba32f) uniform restrict readonly image2D di_hit_b;
+// Reservoirs: a = xyz light point or direction, w W; b = rgb emitted radiance, w normal/type/M.
+layout(set = 0, binding = 17, rgba32f) uniform restrict readonly image2D di_prev_a;
+layout(set = 0, binding = 18, rgba32f) uniform restrict readonly image2D di_prev_b;
+layout(set = 0, binding = 19, rgba32f) uniform restrict image2D di_temp_a;
+layout(set = 0, binding = 20, rgba32f) uniform restrict image2D di_temp_b;
+layout(set = 0, binding = 21, rgba32f) uniform restrict writeonly image2D di_out_a;
+layout(set = 0, binding = 22, rgba32f) uniform restrict writeonly image2D di_out_b;
+
+struct LightSample {
+    vec3 p;        // point on an emitter, or direction for the environment
+    vec3 n;        // emitter normal (emitters are two-sided)
+    vec3 radiance; // emitted radiance
+    bool env;
+};
+
+struct DiReservoir {
+    LightSample y;
+    float W; // UCW in the sample's measure; 0 = none
+    float M;
+};
+
+DiReservoir empty_di() {
+    DiReservoir r;
+    r.y.p = vec3(0.0);
+    r.y.n = vec3(0.0, 1.0, 0.0);
+    r.y.radiance = vec3(0.0);
+    r.y.env = false;
+    r.W = 0.0;
+    r.M = 0.0;
+    return r;
+}
+
+// Normal (2 x 8-bit octahedral), environment flag (1 bit) and M (7 bits) as an exact float.
+float pack_di(vec3 n, bool env, float m) {
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    vec2 e = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    uvec2 q = uvec2(round(clamp(e * 0.5 + 0.5, 0.0, 1.0) * 255.0));
+    return float((q.x << 16u) | (q.y << 8u) | (env ? 128u : 0u) | uint(clamp(round(m), 0.0, 127.0)));
+}
+
+DiReservoir load_di(vec4 a, vec4 b) {
+    DiReservoir r;
+    uint u = uint(max(b.w, 0.0));
+    vec2 e = vec2(float((u >> 16u) & 255u), float((u >> 8u) & 255u)) / 255.0 * 2.0 - 1.0;
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    r.y.p = a.xyz;
+    r.y.n = normalize(n);
+    r.y.radiance = b.rgb;
+    r.y.env = (u & 128u) != 0u;
+    r.W = a.w;
+    r.M = float(u & 127u);
+    if (!(r.W >= 0.0) || isinf(r.W)) r.W = 0.0;
+    return r;
+}
+
+void store_di(bool temp, ivec2 p, DiReservoir r) {
+    vec4 a = vec4(r.y.p, r.W);
+    vec4 b = vec4(r.y.radiance, pack_di(r.y.n, r.y.env, r.M));
+    if (temp) {
+        imageStore(di_temp_a, p, a);
+        imageStore(di_temp_b, p, b);
+    } else {
+        imageStore(di_out_a, p, a);
+        imageStore(di_out_b, p, b);
+    }
+}
+
+// Direction from x1 to the sample and the factor converting a solid angle density at x1 into the
+// sample's measure (cos at the light / distance^2 for emitters, 1 for the environment).
+vec3 di_direction(const ShadingInfo s, const LightSample y, out float to_measure, out float dist) {
+    if (y.env) {
+        to_measure = 1.0;
+        dist = INF;
+        return y.p;
+    }
+    vec3 d = y.p - s.position;
+    float l2 = dot(d, d);
+    dist = sqrt(l2);
+    vec3 wi = d / max(dist, 1e-8);
+    to_measure = abs(dot(y.n, wi)) / max(l2, 1e-12);
+    return wi;
+}
+
+// Integrand in the sample's measure (no visibility) at shading point s; p-hat is its luminance.
+vec3 di_integrand(const ShadingInfo s, const LightSample y) {
+    float g, dist;
+    vec3 wi = di_direction(s, y, g, dist);
+    float c = dot(s.normal, wi);
+    if (c <= 0.0 || dot(s.geo_normal, wi) <= 0.0 || g <= 0.0) return vec3(0.0);
+    return brdf(s, wi) * c * y.radiance * g;
+}
+
+bool di_visible(const ShadingInfo s, const LightSample y) {
+    float g, dist;
+    vec3 wi = di_direction(s, y, g, dist);
+    Ray r;
+    r.o = offset_origin(s, wi);
+    r.d = wi;
+    return !occluded(r, y.env ? INF : dist * (1.0 - 1e-3));
+}
+
+// One light sample from a single strategy: the environment (pdf in solid angle) or an emitter
+// (pdf in area measure). `pdf` is the density of that strategy alone.
+LightSample sample_light(bool env, inout uint rng, out float pdf) {
+    LightSample y;
+    if (env) {
+        y.p = sample_environment_dir(rng, y.radiance, pdf);
+        y.n = vec3(0.0, 1.0, 0.0);
+        y.env = true;
+        return y;
+    }
+    EmitterPoint e = sample_emitter_point(rng);
+    y.p = e.p;
+    y.n = e.n;
+    y.radiance = e.emitted;
+    y.env = false;
+    pdf = e.pmf / max(e.area, 1e-12);
+    return y;
+}
+
+void restir_di_temporal(ivec2 pos) {
+    ShadingInfo s;
+    if (!load_surface(pos, s)) {
+        store_di(true, pos, empty_di());
+        return;
+    }
+    uint rng = pcg_hash(uint(pos.x) + pcg_hash(uint(pos.y) + pcg_hash(frame.frame_index ^ 0x165667b1u)));
+
+    // Initial candidates: light samples and the BSDF hit, balance heuristic over the strategies.
+    // The light candidates are stratified: the first n_env sample the environment, the rest the
+    // emitters (n_env = p_env * M rounded). With the multi-strategy balance heuristic
+    //   w = p_hat / (n_env p_env_dir(y) + n_emit p_emit_area(y) + p_bsdf(y))
+    // this matches drawing each candidate from the p_env mixture when p_env * M is an integer, and
+    // the branch is the same for every pixel (a coin flip per candidate made each warp run both).
+    const int m_light = max(rp.di_candidates, 1);
+    const float p_env = di_environment_probability();
+    const int n_env = clamp(int(floor(p_env * float(m_light) + 0.5)), 0, m_light);
+    const float n_emit = float(m_light - n_env);
+    DiReservoir r = empty_di();
+    r.M = 1.0;
+    float w_sum = 0.0;
+    float p_chosen = 0.0;
+    for (int k = 0; k < m_light; k++) {
+        const bool env = k < n_env;
+        float p_l;
+        LightSample y = sample_light(env, rng, p_l);
+        if (!(p_l > 0.0)) continue;
+        float p_hat = luminance(di_integrand(s, y));
+        if (p_hat <= 0.0) continue;
+        float g, dist;
+        vec3 wi = di_direction(s, y, g, dist);
+        float p_b = get_brdf_density(s, wi) * g; // BSDF strategy density in the sample's measure
+        float w = p_hat / ((env ? float(n_env) : n_emit) * p_l + p_b);
+        w_sum += w;
+        if (rand(rng) * w_sum < w) {
+            r.y = y;
+            p_chosen = p_hat;
+        }
+    }
+    vec4 ha = imageLoad(di_hit_a, pos);
+    if (ha.w >= 0.0) {
+        vec4 hb = imageLoad(di_hit_b, pos);
+        LightSample y;
+        y.p = ha.xyz;
+        y.env = hb.w < 0.0;
+        y.n = y.env ? vec3(0.0, 1.0, 0.0) : unpack_normal(hb.w);
+        y.radiance = hb.rgb;
+        float p_hat = luminance(di_integrand(s, y));
+        if (p_hat > 0.0) {
+            float g, dist;
+            vec3 wi = di_direction(s, y, g, dist);
+            float p_b = get_brdf_density(s, wi) * g;
+            // ha.w is the light sampling density of the p_env mixture; per strategy it is ha.w / p_env
+            // (environment) or ha.w / (1 - p_env) (emitters).
+            float n_p = y.env ? (p_env > 0.0 ? float(n_env) * ha.w / p_env : 0.0)
+                              : (p_env < 1.0 ? n_emit * ha.w / (1.0 - p_env) : 0.0);
+            float w = p_b > 0.0 ? p_hat / (n_p + p_b) : 0.0;
+            w_sum += w;
+            if (w > 0.0 && rand(rng) * w_sum < w) {
+                r.y = y;
+                p_chosen = p_hat;
+            }
+        }
+    }
+    r.W = p_chosen > 0.0 ? w_sum / p_chosen : 0.0;
+    // Visibility reuse: an occluded canonical sample is not worth propagating. The surface is
+    // reloaded afterwards rather than kept live across the ray (see gi_spatial_visibility).
+    if (r.W > 0.0) {
+        bool vis = di_visible(s, r.y);
+        load_surface(pos, s);
+        if (!vis) r.W = 0.0;
+    }
+    p_chosen = r.W > 0.0 ? p_chosen : 0.0;
+    w_sum = p_chosen * r.W; // as a reservoir with M = 1
+
+    if ((rp.flags & RESTIR_FLAG_TEMPORAL) != 0u) {
+        vec4 mo = imageLoad(frame_motion, pos);
+        if (mo.w > 0.0 && mo.z > 0.0) {
+            ivec2 q = ivec2(floor(mo.xy + 0.5));
+            if (inside(q)) {
+                vec4 gp = imageLoad(gbuffer_prev, q);
+                vec4 gc = imageLoad(gbuffer_cur, pos);
+                if (gp.w > 0.0 && abs(gp.w - mo.z) < 0.03 * mo.z + 0.02 && dot(gp.xyz, gc.xyz) > 0.8) {
+                    DiReservoir pr = load_di(imageLoad(di_prev_a, q), imageLoad(di_prev_b, q));
+                    pr.M = min(pr.M, rp.max_confidence);
+                    if (pr.M > 0.0) {
+                        float p = pr.W > 0.0 ? luminance(di_integrand(s, pr.y)) : 0.0;
+                        float w = p * pr.W * pr.M;
+                        r.M += pr.M;
+                        if (w > 0.0) {
+                            w_sum += w;
+                            if (rand(rng) * w_sum < w) {
+                                r.y = pr.y;
+                                p_chosen = p;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    r.W = p_chosen > 0.0 ? w_sum / (r.M * p_chosen) : 0.0;
+    store_di(true, pos, r);
+}
+
+// Visibility rays of the DI spatial resampling, traced first (see gi_spatial_visibility).
+uint di_spatial_visibility(const ivec2 dom[DOMAINS], uint valid) {
+    uint vis = 0u;
+    [[unroll]] for (int j = 0; j < DOMAINS; j++) {
+        [[unroll]] for (int l = 0; l < DOMAINS; l++) {
+            if (l == j || !DOMAIN_VALID(valid, j) || !DOMAIN_VALID(valid, l)) continue;
+            DiReservoir r = load_di(imageLoad(di_temp_a, dom[j]), imageLoad(di_temp_b, dom[j]));
+            if (r.M <= 0.0 || r.W <= 0.0) continue;
+            ShadingInfo sl;
+            load_surface(dom[l], sl);
+            if (luminance(di_integrand(sl, r.y)) <= 0.0) continue;
+            if (di_visible(sl, r.y)) vis |= VIS_BIT(j, l);
+        }
+    }
+    return vis;
+}
+
+void restir_di_spatial(ivec2 pos) {
+    if (imageLoad(gi_hit, pos).w < 0.0) {
+        store_di(false, pos, empty_di());
+        return;
+    }
+    uint rng = pcg_hash(uint(pos.x) + pcg_hash(uint(pos.y) + pcg_hash(frame.frame_index ^ 0x3c6ef372u)));
+    ivec2 dom[DOMAINS];
+    const uint valid = spatial_domains(pos, rng, dom);
+    const uint vis = di_spatial_visibility(dom, valid);
+
+    ShadingInfo shading[DOMAINS];
+    DiReservoir res[DOMAINS];
+    [[unroll]] for (int i = 0; i < DOMAINS; i++) {
+        res[i] = empty_di();
+        if (!DOMAIN_VALID(valid, i)) continue;
+        load_surface(dom[i], shading[i]);
+        res[i] = load_di(imageLoad(di_temp_a, dom[i]), imageLoad(di_temp_b, dom[i]));
+    }
+
+    // Generalized balance heuristic with visibility in every domain's target (see restir.glsli).
+    float w_sum = 0.0;
+    float m_total = 0.0;
+    int chosen = -1;
+    float p_chosen = 0.0;
+    vec3 f_chosen = vec3(0.0);
+    [[unroll]] for (int j = 0; j < DOMAINS; j++) {
+        m_total += res[j].M;
+        if (!DOMAIN_VALID(valid, j) || res[j].W <= 0.0) continue;
+        float own = luminance(di_integrand(shading[j], res[j].y));
+        if (own <= 0.0) continue;
+        float denom = 0.0;
+        float p0 = 0.0;
+        vec3 f0 = vec3(0.0);
+        [[unroll]] for (int l = 0; l < DOMAINS; l++) {
+            if (!DOMAIN_VALID(valid, l)) continue;
+            vec3 f = di_integrand(shading[l], res[j].y);
+            float p = l == j ? own : luminance(f);
+            if (l != j && (vis & VIS_BIT(j, l)) == 0u) p = 0.0;
+            if (l == 0) {
+                p0 = p;
+                f0 = f;
+            }
+            denom += res[l].M * p;
+        }
+        if (p0 <= 0.0 || denom <= 0.0) continue;
+        float w = res[j].M * own / denom * p0 * res[j].W;
+        if (!(w > 0.0) || isinf(w)) continue;
+        w_sum += w;
+        if (rand(rng) * w_sum < w) {
+            chosen = j;
+            p_chosen = p0;
+            f_chosen = f0;
+        }
+    }
+
+    DiReservoir out_r = empty_di();
+    out_r.M = m_total;
+    if (chosen < 0) {
+        store_di(false, pos, out_r);
+        return;
+    }
+    out_r.y = res[chosen].y;
+    out_r.W = w_sum / p_chosen;
+    store_di(false, pos, out_r);
+
+    vec3 c = clamp_contribution(f_chosen * out_r.W, 1u);
+    if (any(isnan(c)) || any(isinf(c))) return;
+    // The canonical sample's visibility was tested when it was created, but temporal reuse can
+    // bring in samples that are occluded now: one shadow ray for what is shaded.
+    if (chosen == 0 && !di_visible(shading[0], out_r.y)) return;
+    vec4 col = imageLoad(frame_color, pos);
+    imageStore(frame_color, pos, vec4(col.rgb + c, col.a));
+}

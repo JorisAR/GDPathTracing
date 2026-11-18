@@ -1,7 +1,12 @@
 name: 🛠️ Builds
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   release:
     types: [created]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -38,64 +43,39 @@ jobs:
             target: template_release
             platform: windows
             arch: x86_64
-          - identifier: android-debug-arm64v8
-            name: Android Debug arm64v8
-            runner: ubuntu-22.04
-            target: template_debug
-            platform: android
-            arch: arm64v8
-          - identifier: android-release-arm64v8
-            name: Android Release arm64v8
-            runner: ubuntu-22.04
-            target: template_release
-            platform: android
-            arch: arm64v8
 
     steps:
-      - name: Checkout project
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
-
+          lfs: false # the Bistro scene (if tracked with LFS) is not needed to build
 
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y zip
+
       - name: Install mingw64
-        if: ${{ startsWith(matrix.identifier, 'windows-') }}
+        if: ${{ matrix.platform == 'windows' }}
         run: |
           sudo apt-get install -y mingw-w64
           sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
           sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
-      - name: Install JDK 17
-        if: ${{ startsWith(matrix.identifier, 'android-') }}
-        uses: actions/setup-java@v3
+
+      - name: Install Python
+        uses: actions/setup-python@v5
         with:
-          java-version: 17
-          distribution: temurin
-
-      - name: Install Android SDK
-        if: ${{ startsWith(matrix.identifier, 'android-') }}
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK r23c
-        if: ${{ matrix.platform == 'android' }}
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r23c
-          link-to-sdk: true
-
-      - name: Install Python and SCons
-        uses: actions/setup-python@v2
+          python-version: '3.12'
 
       - name: Install SCons
         run: |
           python -m pip install --upgrade pip
           python -m pip install scons
+
       - name: Set up SCons cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ${{ github.workspace }}/.scons-cache/
@@ -105,30 +85,28 @@ jobs:
           restore-keys: |
             ${{ matrix.identifier }}-${{ github.ref }}-
             ${{ matrix.identifier }}-
+
       - name: Compile extension
         shell: bash
         env:
           SCONS_CACHE: '${{ github.workspace }}/.scons-cache/'
           SCONS_CACHE_LIMIT: 4096
         run: |
-          scons target='${{ matrix.target }}' platform='${{ matrix.platform }}' arch='${{ matrix.arch }}' -j2
-          ls -l project/addons/*/bin/
+          scons target='${{ matrix.target }}' platform='${{ matrix.platform }}' arch='${{ matrix.arch }}' -j4
+          ls -l demo/addons/*/bin/
 
-      - name: Prepare artifacts with project files
+      - name: Prepare artifact
         shell: bash
         run: |
-          PROJECT_DIR="${{ github.workspace }}/project"
+          # The addon plus the demo scenes; the large Bistro scene and Godot's caches are left out.
+          STAGE="${{ github.workspace }}/stage"
           ARTIFACT_DIR="${{ github.workspace }}/artifacts"
-          
-          # Copy root documentation to project directory
-          cp -v "${{ github.workspace }}/README.md" "$PROJECT_DIR/"
-          cp -v "${{ github.workspace }}/LICENSE" "$PROJECT_DIR/"
-
-          # Create platform-specific zip
-          mkdir -p "$ARTIFACT_DIR"
-          ZIP_NAME="${{ matrix.identifier }}.zip"
-          cd "$PROJECT_DIR"
-          zip -r "$ARTIFACT_DIR/$ZIP_NAME" .
+          mkdir -p "$STAGE" "$ARTIFACT_DIR"
+          rsync -a --exclude '.godot/' --exclude 'bistro/' --exclude '*.lib' --exclude '*.exp' --exclude '*.pdb' \
+            "${{ github.workspace }}/demo/" "$STAGE/"
+          cp -v "${{ github.workspace }}/README.md" "${{ github.workspace }}/LICENSE" "$STAGE/"
+          cd "$STAGE"
+          zip -r "$ARTIFACT_DIR/${{ matrix.identifier }}.zip" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -137,6 +115,7 @@ jobs:
           path: ${{ github.workspace }}/artifacts/${{ matrix.identifier }}.zip
 
   release:
+    if: ${{ github.event_name == 'release' }}
     runs-on: ubuntu-22.04
     needs: build
     steps:
@@ -145,11 +124,11 @@ jobs:
         with:
           path: artifacts
 
-      - name: Create GitHub Release
+      - name: Attach to the GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}  # Use existing tag from release creation
+          tag_name: ${{ github.ref_name }}
           files: |
-            artifacts/*.zip
+            artifacts/*/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

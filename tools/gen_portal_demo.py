@@ -1,13 +1,13 @@
-"""Generates project/demo/portal_demo.tscn and its checker texture.
+"""Generates demo/demo/portal_demo.tscn and its checker texture.
 
-Usage: python tools/gen_portal_demo.py [project_dir]   (default: ./project). Needs Pillow.
+Usage: python tools/gen_portal_demo.py [project_dir]   (default: ./demo). Needs Pillow.
 The scene is generated because it is mostly boxes and portal frames; edit this script, not the
 .tscn, when changing the layout.
 """
 import sys, os
 from PIL import Image
 
-project = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "..", "project")
+project = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "..", "demo")
 
 # ---------------------------------------------------------------- checker texture
 tex_path = os.path.join(project, 'demo', 'materials', 'checker.png')

@@ -29,7 +29,7 @@ if env['PLATFORM'] == 'windows':
 # Handle different platforms
 if env["platform"] == "macos":
     library = env.SharedLibrary(
-        "project/addons/jar_path_tracing/bin/jar_path_tracing.{}.{}.framework/jar_path_tracing.{}.{}".format(
+        "demo/addons/jar_path_tracing/bin/jar_path_tracing.{}.{}.framework/jar_path_tracing.{}.{}".format(
             env["platform"], env["target"], env["platform"], env["target"]
         ),
         source=sources,
@@ -37,17 +37,17 @@ if env["platform"] == "macos":
 elif env["platform"] == "ios":
     if env["ios_simulator"]:
         library = env.StaticLibrary(
-            "project/addons/jar_path_tracing/bin/jar_path_tracing.{}.{}.simulator.a".format(env["platform"], env["target"]),
+            "demo/addons/jar_path_tracing/bin/jar_path_tracing.{}.{}.simulator.a".format(env["platform"], env["target"]),
             source=sources,
         )
     else:
         library = env.StaticLibrary(
-            "project/addons/jar_path_tracing/bin/jar_path_tracing.{}.{}.a".format(env["platform"], env["target"]),
+            "demo/addons/jar_path_tracing/bin/jar_path_tracing.{}.{}.a".format(env["platform"], env["target"]),
             source=sources,
         )
 else:
     library = env.SharedLibrary(
-        "project/addons/jar_path_tracing/bin/jar_path_tracing{}{}".format(env["suffix"], env["SHLIBSUFFIX"]),
+        "demo/addons/jar_path_tracing/bin/jar_path_tracing{}{}".format(env["suffix"], env["SHLIBSUFFIX"]),
         source=sources,
     )
 

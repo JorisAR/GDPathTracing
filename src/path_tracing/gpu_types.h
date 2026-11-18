@@ -38,7 +38,7 @@ static_assert(sizeof(GpuTLASNode) == 32, "GpuTLASNode must be 32 bytes");
 struct GpuTriangle
 {
     float v0[3];
-    float pad0;
+    float alpha_tested; // 1 if some instance's material alpha tests this triangle (cutout textures)
     float e1[3];
     float pad1;
     float e2[3];
@@ -52,15 +52,22 @@ struct GpuTriangleData
     float n0[3];
     uint32_t surface; // surface index within the mesh, resolved via the instance material table
     float n1[3];
-    float pad0;
+    float tangent_x; // per-triangle tangent (object space, from the UVs) for normal maps
     float n2[3];
-    float pad1;
+    float tangent_y;
     float uv0[2];
     float uv1[2];
     float uv2[2];
-    float pad2[2];
+    float tangent_z;
+    float bitangent_sign;
 };
 static_assert(sizeof(GpuTriangleData) == 80, "GpuTriangleData must be 80 bytes");
+
+enum MaterialFlags : uint32_t
+{
+    MATERIAL_FLAG_EMISSION_MULTIPLY = 1u << 0, // emission = color * texture (else color + texture)
+    MATERIAL_FLAG_NORMAL_DIRECTX = 1u << 1,    // DirectX convention normal map (green = +v, i.e. down)
+};
 
 struct GpuMaterial
 {
@@ -71,8 +78,17 @@ struct GpuMaterial
     int32_t albedo_texture; // layer in the texture array, -1 if none
     uint32_t flags;
     float uv_scale_offset[4]; // uv1_scale.xy, uv1_offset.xy
+    int32_t emission_texture; // layer in the texture array, -1 if none
+    float emission_energy;    // multiplies the emission texture (Godot's emission_energy_multiplier)
+    // Layers in the linear (data) texture array, -1 if none.
+    int32_t roughness_texture;
+    int32_t metallic_texture;
+    int32_t normal_texture;
+    uint32_t channels;  // bits 0-2: roughness channel, 3-5: metallic channel (Godot's TextureChannel)
+    float alpha_cutoff; // > 0: alpha scissor threshold; < 0: stochastic alpha; 0 = opaque
+    float normal_scale;
 };
-static_assert(sizeof(GpuMaterial) == 64, "GpuMaterial must be 64 bytes");
+static_assert(sizeof(GpuMaterial) == 96, "GpuMaterial must be 96 bytes");
 
 enum InstanceFlags : uint32_t
 {
@@ -89,18 +105,33 @@ struct GpuInstance
     uint32_t material_offset; // offset into the instance material table
     uint32_t triangle_offset; // offset of the mesh's first triangle (for light lookups)
     uint32_t flags;
+    // Emissive instances: index of the mesh's first triangle in the emissive triangle buffer, which
+    // holds every triangle of the instance (power 0 for non-emitting ones), so a triangle found by
+    // a BSDF ray finds the exact power the light sampler used.
+    uint32_t emissive_offset;
+    uint32_t pad[3];
 };
-static_assert(sizeof(GpuInstance) == 160, "GpuInstance must be 160 bytes");
+static_assert(sizeof(GpuInstance) == 176, "GpuInstance must be 176 bytes");
 
-// Emissive triangle used for next event estimation. Selected proportional to power with a CDF.
+// Emissive triangle used for next event estimation, self-contained so that sampling it takes one
+// lookup (world space corners, UVs and material) instead of instance -> triangle -> material.
+// Selected proportional to power with an alias table (alias_table.h): entry floor(u * n) is kept
+// with probability alias_prob, otherwise its alias is used.
 struct GpuEmissiveTriangle
 {
-    uint32_t instance;
-    uint32_t triangle; // global triangle index
-    float cdf;         // inclusive prefix sum of power / total power
-    float power;       // luminance(emission) * world-space area
+    float v0[3];      // world space
+    float power;      // luminance(emission) * world-space area
+    float e1[3];      // world space v1 - v0
+    float alias_prob; // probability of keeping this entry
+    float e2[3];      // world space v2 - v0
+    uint32_t alias;   // entry used otherwise
+    float uv0[2];
+    float uv1[2];
+    float uv2[2];
+    uint32_t material; // index into the material buffer
+    uint32_t pad;
 };
-static_assert(sizeof(GpuEmissiveTriangle) == 16, "GpuEmissiveTriangle must be 16 bytes");
+static_assert(sizeof(GpuEmissiveTriangle) == 80, "GpuEmissiveTriangle must be 80 bytes");
 
 enum PunctualLightType : uint32_t
 {

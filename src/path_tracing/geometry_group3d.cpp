@@ -1,4 +1,5 @@
 #include "geometry_group3d.h"
+#include "alias_table.h"
 
 #include "path_tracing/portal3d.h"
 #include "rd/rd_util.h"
@@ -65,6 +66,10 @@ void GeometryGroup3D::_bind_methods()
     ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "default_material", PROPERTY_HINT_RESOURCE_TYPE, "BaseMaterial3D"),
                  "set_default_material", "get_default_material");
 
+    ClassDB::bind_method(D_METHOD("get_directx_normal_maps"), &GeometryGroup3D::get_directx_normal_maps);
+    ClassDB::bind_method(D_METHOD("set_directx_normal_maps", "value"), &GeometryGroup3D::set_directx_normal_maps);
+    ADD_PROPERTY(PropertyInfo(Variant::BOOL, "directx_normal_maps"), "set_directx_normal_maps",
+                 "get_directx_normal_maps");
     ClassDB::bind_method(D_METHOD("get_texture_resolution"), &GeometryGroup3D::get_texture_resolution);
     ClassDB::bind_method(D_METHOD("set_texture_resolution", "value"), &GeometryGroup3D::set_texture_resolution);
     ADD_PROPERTY(PropertyInfo(Variant::INT, "texture_resolution", PROPERTY_HINT_RANGE, "16,4096,1"),
@@ -86,6 +91,14 @@ Ref<BaseMaterial3D> GeometryGroup3D::get_default_material() const
 void GeometryGroup3D::set_default_material(const Ref<BaseMaterial3D> &value)
 {
     default_material = value;
+}
+bool GeometryGroup3D::get_directx_normal_maps() const
+{
+    return directx_normal_maps;
+}
+void GeometryGroup3D::set_directx_normal_maps(bool value)
+{
+    directx_normal_maps = value;
 }
 int GeometryGroup3D::get_texture_resolution() const
 {
@@ -197,6 +210,17 @@ int GeometryGroup3D::get_texture_index(const Ref<Texture2D> &texture)
     return static_cast<int>(texture_refs.size() - 1);
 }
 
+int GeometryGroup3D::get_data_texture_index(const Ref<Texture2D> &texture)
+{
+    if (texture.is_null())
+        return -1;
+    for (size_t i = 0; i < data_texture_refs.size(); i++)
+        if (data_texture_refs[i] == texture)
+            return static_cast<int>(i);
+    data_texture_refs.push_back(texture);
+    return static_cast<int>(data_texture_refs.size() - 1);
+}
+
 uint32_t GeometryGroup3D::get_material_index(const Ref<Material> &material)
 {
     Ref<BaseMaterial3D> base = material;
@@ -212,19 +236,58 @@ uint32_t GeometryGroup3D::get_material_index(const Ref<Material> &material)
     m.albedo[0] = albedo.r;
     m.albedo[1] = albedo.g;
     m.albedo[2] = albedo.b;
-    m.albedo[3] = 1.0f;
+    m.albedo[3] = base->get_albedo().a;
+    m.emission_texture = -1;
     if (base->get_feature(BaseMaterial3D::FEATURE_EMISSION))
     {
-        Color e = base->get_emission().srgb_to_linear() * base->get_emission_energy_multiplier();
+        // Godot: emission = (color + texture) * energy, or color * texture * energy (multiply).
+        const float energy = base->get_emission_energy_multiplier();
+        Color e = base->get_emission().srgb_to_linear() * energy;
         m.emission[0] = e.r;
         m.emission[1] = e.g;
         m.emission[2] = e.b;
         m.emission[3] = luminance(e);
+        m.emission_texture = get_texture_index(base->get_texture(BaseMaterial3D::TEXTURE_EMISSION));
+        m.emission_energy = energy;
+        if (base->get_emission_operator() == BaseMaterial3D::EMISSION_OP_MULTIPLY)
+            m.flags |= MATERIAL_FLAG_EMISSION_MULTIPLY;
+        if (m.emission_texture >= 0 && energy <= 0.0f)
+            m.emission_texture = -1;
     }
     m.metallic = base->get_metallic();
     m.roughness = base->get_roughness();
     m.albedo_texture = get_texture_index(base->get_texture(BaseMaterial3D::TEXTURE_ALBEDO));
-    m.flags = 0;
+    // Godot: roughness = roughness * texture[channel], same for metallic.
+    m.roughness_texture = get_data_texture_index(base->get_texture(BaseMaterial3D::TEXTURE_ROUGHNESS));
+    m.metallic_texture = get_data_texture_index(base->get_texture(BaseMaterial3D::TEXTURE_METALLIC));
+    m.channels = (static_cast<uint32_t>(base->get_roughness_texture_channel()) & 7u) |
+                 ((static_cast<uint32_t>(base->get_metallic_texture_channel()) & 7u) << 3);
+    m.normal_texture = -1;
+    m.normal_scale = 1.0f;
+    if (base->get_feature(BaseMaterial3D::FEATURE_NORMAL_MAPPING))
+    {
+        m.normal_texture = get_data_texture_index(base->get_texture(BaseMaterial3D::TEXTURE_NORMAL));
+        m.normal_scale = base->get_normal_scale();
+        if (directx_normal_maps)
+            m.flags |= MATERIAL_FLAG_NORMAL_DIRECTX;
+    }
+    // Alpha: scissor becomes a cutout test; blend, hash and depth prepass become stochastic
+    // transparency (negative cutoff). build() drops it where alpha is one everywhere.
+    m.alpha_cutoff = 0.0f;
+    switch (base->get_transparency())
+    {
+    case BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR:
+        m.alpha_cutoff = MAX(base->get_alpha_scissor_threshold(), 1e-3f);
+        break;
+    case BaseMaterial3D::TRANSPARENCY_ALPHA:
+    case BaseMaterial3D::TRANSPARENCY_ALPHA_HASH:
+    case BaseMaterial3D::TRANSPARENCY_ALPHA_DEPTH_PRE_PASS:
+        m.alpha_cutoff = -1.0f;
+        break;
+    default:
+        m.albedo[3] = 1.0f; // opaque: alpha is ignored, as in Godot
+        break;
+    }
     Vector3 uv_scale = base->get_uv1_scale();
     Vector3 uv_offset = base->get_uv1_offset();
     m.uv_scale_offset[0] = uv_scale.x;
@@ -290,6 +353,29 @@ int GeometryGroup3D::add_mesh(const Ref<Mesh> &mesh)
             set3(d.n0, n[0]);
             set3(d.n1, n[1]);
             set3(d.n2, n[2]);
+            // Per-triangle tangent frame from the UV gradients (normal maps). The shader
+            // orthogonalizes it against the interpolated normal.
+            {
+                const Vector3 e1 = t.v1 - t.v0, e2 = t.v2 - t.v0;
+                const Vector2 d1 = uv[1] - uv[0], d2 = uv[2] - uv[0];
+                const float det = d1.x * d2.y - d2.x * d1.y;
+                Vector3 tangent = e1;
+                float sign = 1.0f;
+                if (Math::abs(det) > 1e-12f)
+                {
+                    const float r = 1.0f / det;
+                    tangent = (e1 * d2.y - e2 * d1.y) * r;
+                    const Vector3 bitangent = (e2 * d1.x - e1 * d2.x) * r;
+                    sign = face.cross(tangent).dot(bitangent) < 0.0f ? -1.0f : 1.0f;
+                }
+                if (tangent.length_squared() <= 0.0f)
+                    tangent = e1;
+                tangent = tangent.normalized();
+                d.tangent_x = tangent.x;
+                d.tangent_y = tangent.y;
+                d.tangent_z = tangent.z;
+                d.bitangent_sign = sign;
+            }
             d.uv0[0] = uv[0].x;
             d.uv0[1] = uv[0].y;
             d.uv1[0] = uv[1].x;
@@ -340,6 +426,7 @@ void GeometryGroup3D::build()
     materials.clear();
     instance_materials.clear();
     texture_refs.clear();
+    data_texture_refs.clear();
     last_light_bytes = PackedByteArray();
     last_portal_bytes = PackedByteArray();
 
@@ -378,7 +465,7 @@ void GeometryGroup3D::build()
         {
             uint32_t m = get_material_index(mi->get_active_material(s));
             instance_materials.push_back(m);
-            if (materials[m].emission[3] > 0.0f)
+            if (materials[m].emission[3] > 0.0f || materials[m].emission_texture >= 0)
                 inst.emissive = true;
         }
         inst.visible = false;
@@ -432,24 +519,59 @@ void GeometryGroup3D::build()
         blas_vertices.push_back(vector_to_bytes(v));
     }
 
-    // Textures: decompress, convert to RGBA8 and resize to a common resolution for the array.
-    std::vector<Ref<Image>> images;
-    for (const Ref<Texture2D> &tex : texture_refs)
-    {
-        Ref<Image> img = tex->get_image();
-        if (img.is_valid())
-            img = img->duplicate();
+    // Textures: decompress, convert to RGBA8 and resize to a common resolution for the arrays.
+    // For compressed textures with mipmaps (DDS), only the smallest mip at least texture_resolution
+    // wide is decompressed: decompressing a full 4K BC texture is far slower.
+    auto load_layer = [&](const Ref<Texture2D> &tex, float &min_alpha) {
+        min_alpha = 1.0f;
+        Ref<Image> img = tex.is_valid() ? tex->get_image() : Ref<Image>();
         if (img.is_null() || img->is_empty())
         {
             img = Image::create_empty(texture_resolution, texture_resolution, false, Image::FORMAT_RGBA8);
             img->fill(Color(1, 1, 1, 1));
+            return img;
         }
+        if (img->is_compressed() && img->has_mipmaps())
+        {
+            int level = 0;
+            int w = img->get_width(), h = img->get_height();
+            while (level + 1 <= img->get_mipmap_count() && MAX(w, h) / 2 >= texture_resolution)
+            {
+                level++;
+                w = MAX(w / 2, 1);
+                h = MAX(h / 2, 1);
+            }
+            if (level > 0)
+            {
+                PackedByteArray data = img->get_data();
+                int64_t from = img->get_mipmap_offset(level);
+                int64_t to = level < img->get_mipmap_count() ? img->get_mipmap_offset(level + 1) : data.size();
+                Ref<Image> mip = Image::create_from_data(w, h, false, img->get_format(), data.slice(from, to));
+                if (mip.is_valid() && !mip->is_empty())
+                    img = mip;
+            }
+        }
+        img = img->duplicate();
         if (img->is_compressed())
             img->decompress();
         img->clear_mipmaps();
         img->convert(Image::FORMAT_RGBA8);
         img->resize(texture_resolution, texture_resolution, Image::INTERPOLATE_BILINEAR);
-        images.push_back(img);
+        PackedByteArray px = img->get_data();
+        const uint8_t *d = px.ptr();
+        uint8_t lo = 255;
+        for (int64_t k = 3; k < px.size() && lo > 0; k += 4)
+            lo = MIN(lo, d[k]);
+        min_alpha = lo / 255.0f;
+        return img;
+    };
+    std::vector<Ref<Image>> images;
+    std::vector<float> texture_min_alpha;
+    for (const Ref<Texture2D> &tex : texture_refs)
+    {
+        float min_alpha = 1.0f;
+        images.push_back(load_layer(tex, min_alpha));
+        texture_min_alpha.push_back(min_alpha);
     }
     if (images.empty())
     {
@@ -457,7 +579,81 @@ void GeometryGroup3D::build()
         img->fill(Color(1, 1, 1, 1));
         images.push_back(img);
     }
+    std::vector<Ref<Image>> data_images;
+    for (const Ref<Texture2D> &tex : data_texture_refs)
+    {
+        float min_alpha = 1.0f;
+        data_images.push_back(load_layer(tex, min_alpha));
+    }
+    if (data_images.empty())
+    {
+        Ref<Image> img = Image::create_empty(images[0]->get_width(), images[0]->get_height(), false, Image::FORMAT_RGBA8);
+        img->fill(Color(1, 1, 1, 1));
+        data_images.push_back(img);
+    }
+
+    // Alpha testing only where alpha (albedo color alpha times texture alpha) can actually reject
+    // a hit; everything else stays on the fast opaque path.
+    for (GpuMaterial &m : materials)
+    {
+        if (m.alpha_cutoff == 0.0f)
+            continue;
+        float min_alpha = m.albedo[3];
+        if (m.albedo_texture >= 0 && m.albedo_texture < (int)texture_min_alpha.size())
+            min_alpha *= texture_min_alpha[m.albedo_texture];
+        const bool cut = m.alpha_cutoff > 0.0f ? min_alpha < m.alpha_cutoff : min_alpha < 254.5f / 255.0f;
+        if (!cut)
+            m.alpha_cutoff = 0.0f;
+    }
+    std::vector<bool> blas_opaque(meshes.size(), true);
+    for (const InstanceEntry &inst : instance_entries)
+    {
+        const MeshEntry &mesh = meshes[inst.mesh];
+        for (size_t t = 0; t < mesh.surfaces.size(); t++)
+        {
+            if (materials[instance_materials[inst.material_offset + mesh.surfaces[t]]].alpha_cutoff <= 0.0f)
+                continue;
+            gpu_tris[mesh.triangle_offset + t].alpha_tested = 1.0f;
+            blas_opaque[inst.mesh] = false;
+        }
+    }
     const int tex_res = images[0]->get_width();
+
+    // Per-triangle emitted luminance of emissive instances, for the light sampling CDF: the average
+    // of the emission at the three corners and the centroid (textures sampled like the shader).
+    auto emission_at = [&](const GpuMaterial &m, Vector2 uv) {
+        Color e(m.emission[0], m.emission[1], m.emission[2]);
+        if (m.emission_texture < 0 || m.emission_texture >= static_cast<int>(images.size()))
+            return luminance(e);
+        const Ref<Image> &img = images[m.emission_texture];
+        uv = uv * Vector2(m.uv_scale_offset[0], m.uv_scale_offset[1]) +
+             Vector2(m.uv_scale_offset[2], m.uv_scale_offset[3]);
+        const int w = img->get_width(), h = img->get_height();
+        int x = static_cast<int>(Math::floor((uv.x - Math::floor(uv.x)) * w)) % w;
+        int y = static_cast<int>(Math::floor((uv.y - Math::floor(uv.y)) * h)) % h;
+        Color t = img->get_pixel(x, y).srgb_to_linear() * m.emission_energy;
+        Color c = (m.flags & MATERIAL_FLAG_EMISSION_MULTIPLY) ? Color(e.r * t.r, e.g * t.g, e.b * t.b)
+                                                               : Color(e.r + t.r, e.g + t.g, e.b + t.b);
+        return luminance(c);
+    };
+    for (InstanceEntry &inst : instance_entries)
+    {
+        inst.tri_emission.clear();
+        if (!inst.emissive)
+            continue;
+        const MeshEntry &mesh = meshes[inst.mesh];
+        inst.tri_emission.resize(mesh.data.size(), 0.0f);
+        for (size_t t = 0; t < mesh.data.size(); t++)
+        {
+            const GpuMaterial &m = materials[instance_materials[inst.material_offset + mesh.surfaces[t]]];
+            if (m.emission[3] <= 0.0f && m.emission_texture < 0)
+                continue;
+            const GpuTriangleData &d = mesh.data[t];
+            const Vector2 a(d.uv0[0], d.uv0[1]), b(d.uv1[0], d.uv1[1]), c(d.uv2[0], d.uv2[1]);
+            inst.tri_emission[t] =
+                0.25f * (emission_at(m, a) + emission_at(m, b) + emission_at(m, c) + emission_at(m, (a + b + c) / 3.0f));
+        }
+    }
 
     PackedByteArray bvh_bytes = vector_to_bytes(bvh_nodes);
     PackedByteArray tri_bytes = vector_to_bytes(gpu_tris);
@@ -473,6 +669,8 @@ void GeometryGroup3D::build()
         s.materials = mat_bytes;
         s.instance_materials = inst_mat_bytes;
         s.textures = images;
+        s.data_textures = data_images;
+        s.blas_opaque = blas_opaque;
         s.texture_resolution = tex_res;
         s.blas_vertices = blas_vertices;
     });
@@ -482,7 +680,7 @@ void GeometryGroup3D::build()
 
     UtilityFunctions::print("[PathTracing] built ", (int64_t)meshes.size(), " meshes, ", (int64_t)total_triangles,
                             " triangles, ", (int64_t)instance_entries.size(), " instances, ",
-                            (int64_t)materials.size(), " materials, ", (int64_t)texture_refs.size(), " textures, ",
+                            (int64_t)materials.size(), " materials, ", (int64_t)(texture_refs.size() + data_texture_refs.size()), " textures, ",
                             (int64_t)light_nodes.size(), " lights, ", (int64_t)portal_nodes.size(), " portals");
 }
 
@@ -603,6 +801,7 @@ void GeometryGroup3D::update_dynamic(bool force)
     uint32_t tlas_instance_count = 0;
     uint32_t emissive_count = 0;
     float total_power = 0.0f;
+    uint32_t emitting = 0;
     bool update_instances = instances_changed;
 
     std::vector<HwInstance> hw_instances;
@@ -625,6 +824,7 @@ void GeometryGroup3D::update_dynamic(bool force)
             g.material_offset = inst.material_offset;
             g.triangle_offset = mesh.triangle_offset;
             g.flags = inst.emissive ? INSTANCE_FLAG_EMISSIVE : 0u;
+            g.emissive_offset = 0;
 
             if (!inst.visible)
                 continue;
@@ -632,30 +832,56 @@ void GeometryGroup3D::update_dynamic(bool force)
             ids.push_back(static_cast<uint32_t>(i));
             hw_instances.push_back({inst.transform, inst.mesh, static_cast<uint32_t>(i)});
 
-            if (inst.emissive)
+            if (inst.emissive && inst.tri_emission.size() == mesh.tris.size())
             {
+                // Every triangle of the instance gets an entry (zero power ones are never picked).
+                g.emissive_offset = static_cast<uint32_t>(emissive.size());
                 for (size_t t = 0; t < mesh.tris.size(); t++)
                 {
-                    const GpuMaterial &m = materials[instance_materials[inst.material_offset + mesh.surfaces[t]]];
-                    if (m.emission[3] <= 0.0f)
-                        continue;
                     const BuildTriangle &tri = mesh.tris[t];
                     Vector3 e1 = inst.transform.basis.xform(tri.v1 - tri.v0);
                     Vector3 e2 = inst.transform.basis.xform(tri.v2 - tri.v0);
                     float area = 0.5f * e1.cross(e2).length();
-                    float power = m.emission[3] * area;
-                    if (power <= 0.0f)
-                        continue;
+                    float power = MAX(inst.tri_emission[t] * area, 0.0f);
                     total_power += power;
-                    emissive.push_back({static_cast<uint32_t>(i), mesh.triangle_offset + static_cast<uint32_t>(t),
-                                        total_power, power});
+                    if (power > 0.0f)
+                        emitting++;
+                    GpuEmissiveTriangle e{};
+                    const Vector3 v0 = inst.transform.xform(tri.v0);
+                    for (int c = 0; c < 3; c++)
+                    {
+                        e.v0[c] = v0[c];
+                        e.e1[c] = e1[c];
+                        e.e2[c] = e2[c];
+                    }
+                    e.power = power;
+                    const GpuTriangleData &d = mesh.data[t];
+                    for (int c = 0; c < 2; c++)
+                    {
+                        e.uv0[c] = d.uv0[c];
+                        e.uv1[c] = d.uv1[c];
+                        e.uv2[c] = d.uv2[c];
+                    }
+                    e.material = instance_materials[inst.material_offset + mesh.surfaces[t]];
+                    emissive.push_back(e);
                 }
             }
         }
-        for (GpuEmissiveTriangle &e : emissive)
-            e.cdf /= total_power;
-        if (!emissive.empty())
-            emissive.back().cdf = 1.0f;
+        if (total_power <= 0.0f)
+            emissive.clear();
+        {
+            std::vector<double> weights(emissive.size());
+            for (size_t k = 0; k < emissive.size(); k++)
+                weights[k] = emissive[k].power;
+            std::vector<float> prob;
+            std::vector<uint32_t> alias;
+            build_alias_table(weights, prob, alias);
+            for (size_t k = 0; k < emissive.size(); k++)
+            {
+                emissive[k].alias_prob = prob[k];
+                emissive[k].alias = alias[k];
+            }
+        }
 
         std::vector<GpuTLASNode> tlas;
         TLASBuilder::build(bounds, ids, tlas);
@@ -666,7 +892,7 @@ void GeometryGroup3D::update_dynamic(bool force)
         tlas_bytes = vector_to_bytes(tlas);
         emissive_bytes = vector_to_bytes(emissive);
         visible_instances = tlas_instance_count;
-        emissive_triangle_count = emissive_count;
+        emissive_triangle_count = emitting;
     }
 
     last_light_bytes = light_bytes;

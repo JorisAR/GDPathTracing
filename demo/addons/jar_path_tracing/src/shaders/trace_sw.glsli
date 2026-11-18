@@ -15,7 +15,7 @@ float intersect_aabb(const Ray r, const vec3 inv_d, const vec3 bmin, const vec3 
 }
 
 // Moller-Trumbore. Updates hit when closer.
-bool intersect_triangle(const Ray r, const uint tri_index, inout Hit hit) {
+bool intersect_triangle(const Ray r, const uint tri_index, const uint instance, inout Hit hit) {
     Triangle tri = triangles[tri_index];
     vec3 e1 = tri.e1.xyz;
     vec3 e2 = tri.e2.xyz;
@@ -31,6 +31,7 @@ bool intersect_triangle(const Ray r, const uint tri_index, inout Hit hit) {
     if (v < 0.0 || u + v > 1.0) return false;
     float t = dot(e2, q) * inv_det;
     if (t <= 0.0 || t >= hit.t) return false;
+    if (tri.v0.w > 0.5 && !alpha_test_pass(instance, tri_index, vec2(u, v))) return false;
     hit.t = t;
     hit.bary = vec2(u, v);
     hit.triangle = tri_index;
@@ -67,7 +68,7 @@ bool trace_tlas(const Ray r, const bool any_hit, inout Hit hit) {
                     hit.steps++;
                     if (bn.tri_count > 0u) {
                         for (uint i = 0u; i < bn.tri_count; i++) {
-                            if (intersect_triangle(local, bn.left_first + i, hit)) {
+                            if (intersect_triangle(local, bn.left_first + i, node.left, hit)) {
                                 blas_found = true;
                                 if (any_hit) return true;
                             }

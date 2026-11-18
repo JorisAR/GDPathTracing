@@ -1,6 +1,7 @@
 #ifndef PATH_TRACING_EFFECT_H
 #define PATH_TRACING_EFFECT_H
 
+#include "path_tracing/environment.h"
 #include "path_tracing/scene_data.h"
 #include "rd/rd_util.h"
 
@@ -46,7 +47,19 @@ struct RenderSettings
     Color ground = Color(0.3f, 0.28f, 0.25f);
     float sky_energy = 1.0f;
     float firefly_clamp = 0.0f; // 0 = off
+    float environment_energy = 1.0f;   // multiplies the environment map
+    float environment_rotation = 0.0f; // radians about +Y
     int debug_mode = 0;
+    // ReSTIR GI (restir.glsli). Neighbour selection follows Junkins et al. 2026 (K candidates in an
+    // R pixel disk, M picked proportional to G-buffer compatibility).
+    bool restir_gi = true;
+    int restir_neighbors = 1;    // M
+    int restir_candidates = 32;  // K
+    float restir_radius = 30.0f; // R, pixels
+    bool restir_guided_selection = true; // false: uniform disk + binary test (Bitterli et al. 2020)
+    // ReSTIR DI (restir_di.glsli): emitters and the environment at directly visible primary hits.
+    bool restir_di = true;
+    int restir_di_candidates = 8; // initial light samples per pixel
 
     // Settings whose change invalidates accumulated history.
     bool same_image(const RenderSettings &o) const
@@ -55,7 +68,11 @@ struct RenderSettings
                accumulate == o.accumulate && temporal_reprojection == o.temporal_reprojection &&
                max_portal_hops == o.max_portal_hops && sky_top == o.sky_top && sky_horizon == o.sky_horizon &&
                ground == o.ground && sky_energy == o.sky_energy && firefly_clamp == o.firefly_clamp &&
-               debug_mode == o.debug_mode;
+               environment_energy == o.environment_energy && environment_rotation == o.environment_rotation &&
+               debug_mode == o.debug_mode && restir_gi == o.restir_gi && restir_neighbors == o.restir_neighbors &&
+               restir_candidates == o.restir_candidates && restir_radius == o.restir_radius &&
+               restir_guided_selection == o.restir_guided_selection && restir_di == o.restir_di &&
+               restir_di_candidates == o.restir_di_candidates;
     }
 };
 
@@ -84,15 +101,18 @@ struct FrameData
     uint32_t portal_count;
     uint32_t max_portal_hops;
     uint32_t pad0;
+    float env_params[4]; // energy, rotation (radians), integral of the sampling weights, unused
+    int32_t env_size[4]; // width, height, unused, unused
 };
-static_assert(sizeof(FrameData) == 320, "FrameData must match the std140 layout");
+static_assert(sizeof(FrameData) == 352, "FrameData must match the std140 layout");
 
 } // namespace PT
 
 // Renders the path traced image straight into the scene's HDR color buffer on Godot's main
 // RenderingDevice. Uses the hardware ray tracing pipeline when available (and allowed),
 // otherwise the software BVH in a compute shader. Per frame: trace (one path per pixel), then
-// the temporal resolve (resolve.glsl), then optionally the spatial denoiser (denoise.glsl). Godot's tonemapper, exposure, glow etc. are applied afterwards as usual.
+// optionally ReSTIR GI (restir.glsl / restir_hw.glsl, temporal then spatial reuse), then the temporal
+// resolve (resolve.glsl), then optionally the spatial denoiser (denoise.glsl). Godot's tonemapper, exposure, glow etc. are applied afterwards as usual.
 class PathTracingEffect : public CompositorEffect
 {
     GDCLASS(PathTracingEffect, CompositorEffect);
@@ -108,9 +128,11 @@ class PathTracingEffect : public CompositorEffect
 
     // Main thread API.
     void set_shader_files(const Ref<RDShaderFile> &software, const Ref<RDShaderFile> &hardware,
-                          const Ref<RDShaderFile> &resolver, const Ref<RDShaderFile> &denoiser);
+                          const Ref<RDShaderFile> &resolver, const Ref<RDShaderFile> &denoiser,
+                          const Ref<RDShaderFile> &restir, const Ref<RDShaderFile> &restir_hw);
     void set_scene(const PT::SceneDataPtr &scene);
     void set_settings(const PT::RenderSettings &settings);
+    void set_environment(const PT::EnvironmentPtr &environment);
     void reset_accumulation();
     int get_sample_count() const;
     // 0 = not rendering yet, 1 = software, 2 = hardware.
@@ -127,20 +149,26 @@ class PathTracingEffect : public CompositorEffect
         bool failed = false;
     };
 
-    bool ensure_pipeline(RenderingDevice *rd, Pipeline &p, const Ref<RDShaderFile> &file, const char *name);
-    bool ensure_raytracing_pipeline(RenderingDevice *rd, Pipeline &p, const Ref<RDShaderFile> &file);
+    bool ensure_pipeline(RenderingDevice *rd, Pipeline &p, const Ref<RDShaderFile> &file, const char *name,
+                         const StringName &version = StringName());
+    bool ensure_raytracing_pipeline(RenderingDevice *rd, Pipeline &p, const Ref<RDShaderFile> &file,
+                                    const char *name, const StringName &version = StringName());
+    void free_pipeline(RenderingDevice *rd, Pipeline &p);
     void ensure_sampler(RenderingDevice *rd);
     void upload_scene(RenderingDevice *rd, const PT::SceneSnapshot &snap, bool hardware);
     void build_hardware_structures(RenderingDevice *rd, const PT::SceneSnapshot &snap, bool geometry_changed,
                                    bool instances_changed);
     void free_hardware_structures(RenderingDevice *rd);
     void free_resources();
-    void trace(RenderingDevice *rd, const Pipeline &pipe, bool use_hardware, const Vector2i &size, RID frame_color,
-               RID frame_motion, RID frame_albedo, RID gbuffer);
+    // Binds the scene (sets 1 and 2) next to `set0` and runs `pipe` over the viewport, as a ray
+    // tracing pipeline when `use_hardware`, else as a compute shader.
+    void dispatch_scene(RenderingDevice *rd, const Pipeline &pipe, bool use_hardware, const Vector2i &size,
+                        const TypedArray<RDUniform> &set0, const PackedByteArray &push_constant);
     void dispatch_compute(RenderingDevice *rd, const Pipeline &p, const TypedArray<RDUniform> &uniforms,
                           const PackedByteArray &push_constant, const Vector2i &size);
     void run_denoiser(RenderingDevice *rd, const Ref<RenderSceneBuffersRD> &buffers, const Vector2i &size,
-                      uint32_t source_slot, int iterations);
+                      uint32_t source_slot, int iterations,
+                      const Transform3D &cam_transform, const Projection &projection);
 
     // Shared between threads, guarded by `mutex`.
     std::mutex mutex;
@@ -148,7 +176,10 @@ class PathTracingEffect : public CompositorEffect
     Ref<RDShaderFile> hardware_file;
     Ref<RDShaderFile> resolve_file;
     Ref<RDShaderFile> denoise_file;
+    Ref<RDShaderFile> restir_file;
+    Ref<RDShaderFile> restir_hw_file;
     PT::SceneDataPtr scene;
+    PT::EnvironmentPtr environment;
     PT::RenderSettings settings;
     std::atomic<bool> reset_requested{false};
     std::atomic<int> sample_count{0};
@@ -160,10 +191,19 @@ class PathTracingEffect : public CompositorEffect
     Pipeline hardware;
     Pipeline resolver;
     Pipeline denoiser;
+    // One pipeline per ReSTIR pass (shader versions gi_temporal, gi_spatial, di_temporal, di_spatial).
+    Pipeline restir_sw[4];
+    Pipeline restir_hw[4];
     RID sampler;
     RID texture_array;
+    RID data_texture_array;
+    RID environment_texture; // RGBA32F equirect (1x1 black without an environment map)
+    PT::GpuBuffer environment_cdf;
+    uint64_t environment_version = ~0ull;
 
     PT::GpuBuffer frame_buffer{PT::GpuBuffer::UNIFORM};
+    PT::GpuBuffer restir_params[4] = {PT::GpuBuffer{PT::GpuBuffer::UNIFORM}, PT::GpuBuffer{PT::GpuBuffer::UNIFORM},
+                                      PT::GpuBuffer{PT::GpuBuffer::UNIFORM}, PT::GpuBuffer{PT::GpuBuffer::UNIFORM}};
     PT::GpuBuffer bvh_buffer, triangle_buffer, triangle_data_buffer, material_buffer, instance_material_buffer;
     PT::GpuBuffer instance_buffer, tlas_buffer, emissive_buffer, light_buffer, portal_buffer;
 
@@ -188,6 +228,12 @@ class PathTracingEffect : public CompositorEffect
     RID history_textures[2];
     RID gbuffer_textures[2];
     RID aux_textures[2];
+    RID reservoir_a[2];
+    RID reservoir_b[2];
+    bool reservoirs_valid = false; // last frame wrote ReSTIR GI reservoirs
+    RID di_reservoir_a[2];
+    RID di_reservoir_b[2];
+    bool di_reservoirs_valid = false; // last frame wrote ReSTIR DI reservoirs
     uint32_t parity = 0;
     uint32_t frame_index = 0;
     uint32_t frames_since_change = 0;

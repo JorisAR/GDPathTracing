@@ -45,3 +45,19 @@ void main() {
     payload.primitive = uint(gl_PrimitiveID);
     payload.hit = 1u;
 }
+
+#[any_hit]
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+// Alpha scissor for non-opaque (alpha tested) geometry.
+
+#include "common.glsli"
+
+hitAttributeEXT vec2 attribs;
+
+void main() {
+    uint instance = uint(gl_InstanceCustomIndexEXT);
+    uint triangle = instances[instance].triangle_offset + uint(gl_PrimitiveID);
+    if (triangles[triangle].v0.w > 0.5 && !alpha_test_pass(instance, triangle, attribs)) ignoreIntersectionEXT;
+}

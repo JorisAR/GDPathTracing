@@ -29,6 +29,46 @@ const char *DENOISE_NAMES[2] = {"denoise0", "denoise1"};
 const char *FRAME_COLOR = "frame_color";
 const char *FRAME_MOTION = "frame_motion";
 const char *FRAME_ALBEDO = "frame_albedo";
+const char *GI_HIT = "gi_hit";
+// Primary hit material for the ReSTIR passes (rgba32ui, half floats): diffuse albedo, roughness, F0.
+const char *SURFACE = "surface";
+const char *GI_SAMPLE = "gi_sample";
+const char *GI_RADIANCE = "gi_radiance";
+const char *RESERVOIR_A_NAMES[2] = {"reservoir_a0", "reservoir_a1"};
+const char *RESERVOIR_B_NAMES[2] = {"reservoir_b0", "reservoir_b1"};
+const char *RESERVOIR_TEMP_A = "reservoir_temp_a";
+const char *RESERVOIR_TEMP_B = "reservoir_temp_b";
+const char *DI_HIT_A = "di_hit_a";
+const char *DI_HIT_B = "di_hit_b";
+const char *DI_RESERVOIR_A_NAMES[2] = {"di_reservoir_a0", "di_reservoir_a1"};
+const char *DI_RESERVOIR_B_NAMES[2] = {"di_reservoir_b0", "di_reservoir_b1"};
+const char *DI_RESERVOIR_TEMP_A = "di_reservoir_temp_a";
+const char *DI_RESERVOIR_TEMP_B = "di_reservoir_temp_b";
+
+// Mirror of the push constant block in restir.glsli.
+struct RestirParams
+{
+    uint32_t mode;
+    uint32_t flags;
+    int32_t candidates;
+    int32_t neighbors;
+    float radius;
+    float omega;
+    float beta;
+    float max_confidence;
+    int32_t di_candidates;
+    int32_t pad[3];
+};
+static_assert(sizeof(RestirParams) == 48, "RestirParams must match restir.glsli");
+enum RestirMode : uint32_t
+{
+    RESTIR_TEMPORAL = 0,
+    RESTIR_SPATIAL = 1,
+    RESTIR_DI_TEMPORAL = 2,
+    RESTIR_DI_SPATIAL = 3,
+};
+constexpr uint32_t RESTIR_FLAG_TEMPORAL = 1u;
+constexpr uint32_t RESTIR_FLAG_UNIFORM = 2u;
 
 // Mirror of the push constant block in resolve.glsl.
 struct ResolveParams
@@ -45,11 +85,16 @@ struct DenoiseParams
     int32_t step;
     int32_t mode;
     float sigma_luminance;
-    float sigma_normal;
-    float sigma_depth;
+    float beta;        // normal exponent of the compatibility heuristic (Junkins et al. 2026, eq. 15)
+    float sigma_plane; // plane distance tolerance in pixel footprints
+    float omega;       // solid angle of the heuristic's world-space radius
+    float pixel_to_dir[16];
+    uint32_t frame;
+    int32_t candidates;
+    float radius;
     float pad;
 };
-static_assert(sizeof(DenoiseParams) == 32, "DenoiseParams must match denoise.glsl");
+static_assert(sizeof(DenoiseParams) == 112, "DenoiseParams must match denoise.glsl");
 enum DenoiseMode : int32_t
 {
     DENOISE_PREPARE = 0,
@@ -62,7 +107,13 @@ enum FrameFlags : uint32_t
     FLAG_REPROJECT = 1u,
     FLAG_COPY_ONLY = 2u,
     FLAG_RESET = 4u,
+    FLAG_STATIC = 8u, // nothing moved for two frames: no reprojection or surface tests
 };
+
+// FrameData::flags (common.glsli).
+constexpr uint32_t FRAME_FLAG_RESTIR = 1u;
+constexpr uint32_t FRAME_FLAG_ENVIRONMENT = 2u;
+constexpr uint32_t FRAME_FLAG_RESTIR_DI = 4u;
 
 constexpr uint32_t UNLIMITED_HISTORY = 1u << 30;
 
@@ -110,11 +161,12 @@ bool projection_equal(const Projection &a, const Projection &b)
     return true;
 }
 
-RID ensure_texture(const Ref<RenderSceneBuffersRD> &buffers, const char *name, const Vector2i &size)
+RID ensure_texture(const Ref<RenderSceneBuffersRD> &buffers, const char *name, const Vector2i &size,
+                   RenderingDevice::DataFormat format = RenderingDevice::DATA_FORMAT_R32G32B32A32_SFLOAT)
 {
     if (!buffers->has_texture(CONTEXT, name))
     {
-        buffers->create_texture(CONTEXT, name, RenderingDevice::DATA_FORMAT_R32G32B32A32_SFLOAT,
+        buffers->create_texture(CONTEXT, name, format,
                                 RenderingDevice::TEXTURE_USAGE_STORAGE_BIT | RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT,
                                 RenderingDevice::TEXTURE_SAMPLES_1, size, 1, 1, true, false);
     }
@@ -142,19 +194,28 @@ void PathTracingEffect::_notification(int p_what)
 }
 
 void PathTracingEffect::set_shader_files(const Ref<RDShaderFile> &p_software, const Ref<RDShaderFile> &p_hardware,
-                                         const Ref<RDShaderFile> &p_resolver, const Ref<RDShaderFile> &p_denoiser)
+                                         const Ref<RDShaderFile> &p_resolver, const Ref<RDShaderFile> &p_denoiser,
+                                         const Ref<RDShaderFile> &p_restir, const Ref<RDShaderFile> &p_restir_hw)
 {
     std::lock_guard<std::mutex> lock(mutex);
     software_file = p_software;
     hardware_file = p_hardware;
     resolve_file = p_resolver;
     denoise_file = p_denoiser;
+    restir_file = p_restir;
+    restir_hw_file = p_restir_hw;
 }
 
 void PathTracingEffect::set_scene(const SceneDataPtr &p_scene)
 {
     std::lock_guard<std::mutex> lock(mutex);
     scene = p_scene;
+}
+
+void PathTracingEffect::set_environment(const EnvironmentPtr &p_environment)
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    environment = p_environment;
 }
 
 void PathTracingEffect::set_settings(const RenderSettings &p_settings)
@@ -204,47 +265,58 @@ void PathTracingEffect::free_resources()
     RenderingDevice *rd = device;
     free_hardware_structures(rd);
     // Freeing a shader also frees its pipeline and the cached uniform sets that depend on it.
-    if (software.shader.is_valid())
-        rd->free_rid(software.shader);
-    if (denoiser.shader.is_valid())
-        rd->free_rid(denoiser.shader);
-    if (resolver.shader.is_valid())
-        rd->free_rid(resolver.shader);
-    if (hardware.sbt.is_valid())
+    for (Pipeline *p : {&software, &hardware, &resolver, &denoiser})
+        free_pipeline(rd, *p);
+    for (int i = 0; i < 4; i++)
     {
-        rd->hit_sbt_range_free(hardware.sbt, hardware.sbt_range);
-        rd->free_rid(hardware.sbt);
+        free_pipeline(rd, restir_sw[i]);
+        free_pipeline(rd, restir_hw[i]);
     }
-    if (hardware.pipeline.is_valid())
-        rd->free_rid(hardware.pipeline);
-    if (hardware.shader.is_valid())
-        rd->free_rid(hardware.shader);
     if (sampler.is_valid())
         rd->free_rid(sampler);
     if (texture_array.is_valid())
         rd->free_rid(texture_array);
+    if (data_texture_array.is_valid())
+        rd->free_rid(data_texture_array);
+    data_texture_array = RID();
+    if (environment_texture.is_valid())
+        rd->free_rid(environment_texture);
+    environment_texture = RID();
+    environment_version = ~0ull;
+    environment_cdf.free(rd);
     for (GpuBuffer *b : {&frame_buffer, &bvh_buffer, &triangle_buffer, &triangle_data_buffer, &material_buffer,
                          &instance_material_buffer, &instance_buffer, &tlas_buffer, &emissive_buffer, &light_buffer,
-                         &portal_buffer})
+                         &portal_buffer, &restir_params[0], &restir_params[1],
+                         &restir_params[2], &restir_params[3]})
         b->free(rd);
-    software = Pipeline();
-    hardware = Pipeline();
-    denoiser = Pipeline();
-    resolver = Pipeline();
     sampler = RID();
     texture_array = RID();
     device = nullptr;
 }
 
+void PathTracingEffect::free_pipeline(RenderingDevice *rd, Pipeline &p)
+{
+    if (p.sbt.is_valid())
+    {
+        rd->hit_sbt_range_free(p.sbt, p.sbt_range);
+        rd->free_rid(p.sbt);
+        if (p.pipeline.is_valid())
+            rd->free_rid(p.pipeline); // ray tracing pipeline
+    }
+    if (p.shader.is_valid())
+        rd->free_rid(p.shader);
+    p = Pipeline();
+}
+
 bool PathTracingEffect::ensure_pipeline(RenderingDevice *rd, Pipeline &p, const Ref<RDShaderFile> &file,
-                                        const char *name)
+                                        const char *name, const StringName &version)
 {
     if (p.pipeline.is_valid())
         return true;
     if (p.failed || file.is_null())
         return false;
 
-    Ref<RDShaderSPIRV> spirv = file->get_spirv();
+    Ref<RDShaderSPIRV> spirv = file->get_spirv(version);
     String err = spirv.is_valid() ? spirv->get_stage_compile_error(RenderingDevice::SHADER_STAGE_COMPUTE)
                                   : String("no SPIR-V");
     if (!err.is_empty())
@@ -281,33 +353,35 @@ void PathTracingEffect::ensure_sampler(RenderingDevice *rd)
     sampler = rd->sampler_create(ss);
 }
 
-bool PathTracingEffect::ensure_raytracing_pipeline(RenderingDevice *rd, Pipeline &p, const Ref<RDShaderFile> &file)
+bool PathTracingEffect::ensure_raytracing_pipeline(RenderingDevice *rd, Pipeline &p, const Ref<RDShaderFile> &file,
+                                                   const char *name, const StringName &version)
 {
     if (p.pipeline.is_valid())
         return true;
     if (p.failed || file.is_null())
         return false;
 
-    Ref<RDShaderSPIRV> spirv = file->get_spirv();
+    Ref<RDShaderSPIRV> spirv = file->get_spirv(version);
     if (spirv.is_null())
     {
         p.failed = true;
         return false;
     }
-    const RenderingDevice::ShaderStage stages[] = {RenderingDevice::SHADER_STAGE_RAYGEN,
-                                                   RenderingDevice::SHADER_STAGE_MISS,
-                                                   RenderingDevice::SHADER_STAGE_CLOSEST_HIT};
+    const RenderingDevice::ShaderStage stages[] = {
+        RenderingDevice::SHADER_STAGE_RAYGEN, RenderingDevice::SHADER_STAGE_MISS,
+        RenderingDevice::SHADER_STAGE_CLOSEST_HIT, RenderingDevice::SHADER_STAGE_ANY_HIT};
     for (RenderingDevice::ShaderStage stage : stages)
     {
         String err = spirv->get_stage_compile_error(stage);
         if (!err.is_empty())
         {
-            UtilityFunctions::printerr("[PathTracing] hardware shader compile error (stage ", (int)stage, "):\n", err);
+            UtilityFunctions::printerr("[PathTracing] ", name, " shader compile error (stage ", (int)stage, "):\n",
+                                       err);
             p.failed = true;
             return false;
         }
     }
-    p.shader = rd->shader_create_from_spirv(spirv, "jar_path_tracing_hw");
+    p.shader = rd->shader_create_from_spirv(spirv, name);
     if (!p.shader.is_valid())
     {
         p.failed = true;
@@ -321,6 +395,9 @@ bool PathTracingEffect::ensure_raytracing_pipeline(RenderingDevice *rd, Pipeline
     Ref<RDHitGroup> hit_group;
     hit_group.instantiate();
     hit_group->set_closest_hit_shader(ps);
+    // Alpha tested geometry: the any-hit stage discards cutout texels (non-opaque BLASes only).
+    if (!spirv->get_stage_bytecode(RenderingDevice::SHADER_STAGE_ANY_HIT).is_empty())
+        hit_group->set_any_hit_shader(ps);
     TypedArray<RDPipelineShader> raygen, miss;
     raygen.push_back(ps);
     miss.push_back(ps);
@@ -346,8 +423,11 @@ void PathTracingEffect::build_hardware_structures(RenderingDevice *rd, const Sce
     if (geometry_changed || blases.empty())
     {
         free_hardware_structures(rd);
-        for (const PackedByteArray &verts : snap.blas_vertices)
+        for (size_t mesh = 0; mesh < snap.blas_vertices.size(); mesh++)
         {
+            const PackedByteArray &verts = snap.blas_vertices[mesh];
+            // Meshes with alpha tested triangles are non-opaque, so the any-hit shader runs for them.
+            const bool opaque = mesh >= snap.blas_opaque.size() || snap.blas_opaque[mesh];
             uint32_t vertex_count = static_cast<uint32_t>(verts.size() / 12);
             RID vb = rd->vertex_buffer_create(
                 static_cast<uint32_t>(verts.size()), verts,
@@ -355,7 +435,8 @@ void PathTracingEffect::build_hardware_structures(RenderingDevice *rd, const Sce
                     RenderingDevice::BUFFER_CREATION_DEVICE_ADDRESS_BIT);
             Ref<RDAccelerationStructureGeometry> geo;
             geo.instantiate();
-            geo->set_flags(RenderingDevice::ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT);
+            if (opaque)
+                geo->set_flags(RenderingDevice::ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT);
             geo->set_vertex_buffer(vb);
             geo->set_vertex_offset(0);
             geo->set_vertex_stride(12);
@@ -397,8 +478,7 @@ void PathTracingEffect::build_hardware_structures(RenderingDevice *rd, const Sce
         inst->set_mask(0xFF);
         inst->set_blas(blases[hi.mesh]);
         inst->set_hit_sbt_range(hardware.sbt_range);
-        inst->set_flags(RenderingDevice::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT |
-                        RenderingDevice::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT);
+        inst->set_flags(RenderingDevice::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT);
         list.push_back(inst);
     }
     if (list.is_empty())
@@ -428,27 +508,34 @@ void PathTracingEffect::upload_scene(RenderingDevice *rd, const SceneSnapshot &s
         material_buffer.upload(rd, snap.materials);
         instance_material_buffer.upload(rd, snap.instance_materials);
 
-        if (texture_array.is_valid())
-            rd->free_rid(texture_array);
-        texture_array = RID();
-        if (!snap.textures.empty())
-        {
+        // Colors are sRGB; roughness, metallic and normal maps are linear data.
+        auto make_array = [&](const std::vector<Ref<Image>> &images, RenderingDevice::DataFormat format) {
+            if (images.empty())
+                return RID();
             Ref<RDTextureFormat> fmt;
             fmt.instantiate();
-            fmt->set_format(RenderingDevice::DATA_FORMAT_R8G8B8A8_SRGB);
+            fmt->set_format(format);
             fmt->set_texture_type(RenderingDevice::TEXTURE_TYPE_2D_ARRAY);
             fmt->set_width(snap.texture_resolution);
             fmt->set_height(snap.texture_resolution);
-            fmt->set_array_layers(static_cast<uint32_t>(snap.textures.size()));
+            fmt->set_array_layers(static_cast<uint32_t>(images.size()));
             fmt->set_usage_bits(RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT |
                                 RenderingDevice::TEXTURE_USAGE_CAN_UPDATE_BIT);
             TypedArray<PackedByteArray> layers;
-            for (const Ref<Image> &img : snap.textures)
+            for (const Ref<Image> &img : images)
                 layers.push_back(img->get_data());
             Ref<RDTextureView> view;
             view.instantiate();
-            texture_array = rd->texture_create(fmt, view, layers);
+            return rd->texture_create(fmt, view, layers);
+        };
+        for (RID *t : {&texture_array, &data_texture_array})
+        {
+            if (t->is_valid())
+                rd->free_rid(*t);
+            *t = RID();
         }
+        texture_array = make_array(snap.textures, RenderingDevice::DATA_FORMAT_R8G8B8A8_SRGB);
+        data_texture_array = make_array(snap.data_textures, RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM);
     }
 
     if (instances_changed)
@@ -480,7 +567,8 @@ void PathTracingEffect::upload_scene(RenderingDevice *rd, const SceneSnapshot &s
 }
 
 void PathTracingEffect::run_denoiser(RenderingDevice *rd, const Ref<RenderSceneBuffersRD> &buffers,
-                                     const Vector2i &size, uint32_t slot, int iterations)
+                                     const Vector2i &size, uint32_t slot, int iterations,
+                                     const Transform3D &cam_transform, const Projection &projection)
 {
     RID tmp[2] = {ensure_texture(buffers, DENOISE_NAMES[0], size), ensure_texture(buffers, DENOISE_NAMES[1], size)};
     RID color = buffers->get_color_layer(0);
@@ -489,8 +577,16 @@ void PathTracingEffect::run_denoiser(RenderingDevice *rd, const Ref<RenderSceneB
     params.size[0] = size.x;
     params.size[1] = size.y;
     params.sigma_luminance = 4.0f;
-    params.sigma_normal = 128.0f;
-    params.sigma_depth = 1.0f;
+    // The paper uses beta = 8 to pick ReSTIR neighbours; a filter averages radiance directly, so
+    // creases need a much sharper normal falloff.
+    params.beta = 64.0f;
+    params.sigma_plane = 1.0f;
+    params.omega = 0.05f; // paper's value
+    write_projection(params.pixel_to_dir,
+                     Projection(Transform3D(cam_transform.basis, Vector3())) * projection.inverse());
+    params.frame = frame_index;
+    params.candidates = 32; // K, paper's recommended 8..32
+    params.radius = 8.0f;
 
     // Pass 0 prepares tmp[0]; filter pass i reads tmp[i % 2] and writes tmp[(i + 1) % 2]; the
     // last one writes the color buffer instead.
@@ -526,16 +622,20 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
     device = rd;
 
     SceneDataPtr scene_ptr;
+    EnvironmentPtr env;
     RenderSettings current;
-    Ref<RDShaderFile> sw_file, hw_file, rs_file, dn_file;
+    Ref<RDShaderFile> sw_file, hw_file, rs_file, dn_file, rt_file, rt_hw_file;
     {
         std::lock_guard<std::mutex> lock(mutex);
         scene_ptr = scene;
+        env = environment;
         current = settings;
         sw_file = software_file;
         hw_file = hardware_file;
         rs_file = resolve_file;
         dn_file = denoise_file;
+        rt_file = restir_file;
+        rt_hw_file = restir_hw_file;
     }
     if (!scene_ptr)
         return;
@@ -543,7 +643,7 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
     // Pick the backend: hardware ray tracing pipeline when allowed and supported, software otherwise.
     bool use_hardware = false;
     if (current.backend != BACKEND_SOFTWARE && rd->has_feature(RenderingDevice::SUPPORTS_RAYTRACING_PIPELINE))
-        use_hardware = ensure_raytracing_pipeline(rd, hardware, hw_file);
+        use_hardware = ensure_raytracing_pipeline(rd, hardware, hw_file, "jar_path_tracing_hw");
     if (!use_hardware && current.backend == BACKEND_HARDWARE)
     {
         static bool warned = false;
@@ -566,6 +666,43 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
         return;
 
     bool reset = reset_requested.exchange(false);
+
+    // Environment map: texture + importance sampling tables, re-uploaded when it changes.
+    const uint64_t env_version = env ? env->version : 0;
+    if (env_version != environment_version || !environment_texture.is_valid())
+    {
+        if (environment_texture.is_valid())
+            rd->free_rid(environment_texture);
+        Ref<RDTextureFormat> fmt;
+        fmt.instantiate();
+        fmt->set_format(RenderingDevice::DATA_FORMAT_R32G32B32A32_SFLOAT);
+        fmt->set_width(env ? env->width : 1);
+        fmt->set_height(env ? env->height : 1);
+        fmt->set_usage_bits(RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_CAN_UPDATE_BIT);
+        TypedArray<PackedByteArray> layers;
+        if (env)
+        {
+            layers.push_back(env->image->get_data());
+            environment_cdf.upload(rd, env->alias);
+        }
+        else
+        {
+            PackedByteArray black;
+            black.resize(16);
+            black.fill(0);
+            layers.push_back(black);
+            PackedByteArray one; // a single texel that keeps itself
+            one.resize(8);
+            one.encode_float(0, 1.0f);
+            one.encode_u32(4, 0);
+            environment_cdf.upload(rd, one);
+        }
+        Ref<RDTextureView> view;
+        view.instantiate();
+        environment_texture = rd->texture_create(fmt, view, layers);
+        environment_version = env_version;
+        reset = true;
+    }
     if (use_hardware != was_hardware)
         reset = true;
     was_hardware = use_hardware;
@@ -578,7 +715,8 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
     const bool scene_moved = instance_version != prev_instances;
     if (geometry_version != prev_geometry)
         reset = true;
-    if (!bvh_buffer.rid().is_valid() || !instance_buffer.rid().is_valid() || !texture_array.is_valid())
+    if (!bvh_buffer.rid().is_valid() || !instance_buffer.rid().is_valid() || !texture_array.is_valid() ||
+        !data_texture_array.is_valid())
         return;
     if (use_hardware && !hw_tlas.is_valid())
         return;
@@ -606,6 +744,7 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
     const bool temporal = current.accumulate && current.temporal_reprojection;
     if (!has_previous)
         reset = true;
+    const bool current_reset = reset; // settings/scene/resolution: invalidates ReSTIR reservoirs too
     if (!temporal && (camera_moved || scene_moved))
         reset = true; // plain accumulation restarts on any change
 
@@ -658,6 +797,23 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
     fd.debug_mode = static_cast<uint32_t>(current.debug_mode);
     fd.portal_count = portal_count;
     fd.max_portal_hops = static_cast<uint32_t>(MAX(current.max_portal_hops, 0));
+    fd.env_params[0] = current.environment_energy;
+    fd.env_params[1] = current.environment_rotation;
+    fd.env_params[2] = env ? env->integral : 0.0f;
+    fd.env_size[0] = env ? env->width : 1;
+    fd.env_size[1] = env ? env->height : 1;
+
+    // ReSTIR GI needs its pass for the active backend; without it the trace pass keeps full paths.
+    bool restir = (current.restir_gi || current.restir_di) && current.debug_mode == 0;
+    static const char *const RESTIR_VERSIONS[4] = {"gi_temporal", "gi_spatial", "di_temporal", "di_spatial"};
+    for (int i = 0; i < 4 && restir; i++)
+        restir = use_hardware ? ensure_raytracing_pipeline(rd, restir_hw[i], rt_hw_file, "jar_path_tracing_restir_hw",
+                                                           RESTIR_VERSIONS[i])
+                              : ensure_pipeline(rd, restir_sw[i], rt_file, "jar_path_tracing_restir", RESTIR_VERSIONS[i]);
+    const bool restir_gi = restir && current.restir_gi;
+    const bool restir_di = restir && current.restir_di;
+    fd.flags = (restir_gi ? FRAME_FLAG_RESTIR : 0u) | (restir_di ? FRAME_FLAG_RESTIR_DI : 0u) |
+               (env && env->integral > 0.0f ? FRAME_FLAG_ENVIRONMENT : 0u);
     frame_buffer.upload(rd, to_bytes(&fd, 1));
 
     last_cam_transform = cam_transform;
@@ -673,15 +829,125 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
     const RID frame_albedo = ensure_texture(buffers, FRAME_ALBEDO, size);
     const RID color_image = buffers->get_color_layer(0);
 
+    const RID gi_hit = ensure_texture(buffers, GI_HIT, size);
+    const RID surface = ensure_texture(buffers, SURFACE, size, RenderingDevice::DATA_FORMAT_R32G32B32A32_UINT);
+    const RID gi_sample = ensure_texture(buffers, GI_SAMPLE, size);
+    const RID gi_radiance = ensure_texture(buffers, GI_RADIANCE, size);
+    const RID reservoir_temp_a = ensure_texture(buffers, RESERVOIR_TEMP_A, size);
+    const RID reservoir_temp_b = ensure_texture(buffers, RESERVOIR_TEMP_B, size);
+    const RID di_hit_a = ensure_texture(buffers, DI_HIT_A, size);
+    const RID di_hit_b = ensure_texture(buffers, DI_HIT_B, size);
+    const RID di_temp_a = ensure_texture(buffers, DI_RESERVOIR_TEMP_A, size);
+    const RID di_temp_b = ensure_texture(buffers, DI_RESERVOIR_TEMP_B, size);
+    for (int i = 0; i < 2; i++)
+    {
+        RID a = ensure_texture(buffers, DI_RESERVOIR_A_NAMES[i], size);
+        RID b = ensure_texture(buffers, DI_RESERVOIR_B_NAMES[i], size);
+        if (a != di_reservoir_a[i] || b != di_reservoir_b[i])
+            di_reservoirs_valid = false;
+        di_reservoir_a[i] = a;
+        di_reservoir_b[i] = b;
+    }
+    for (int i = 0; i < 2; i++)
+    {
+        RID a = ensure_texture(buffers, RESERVOIR_A_NAMES[i], size);
+        RID b = ensure_texture(buffers, RESERVOIR_B_NAMES[i], size);
+        if (a != reservoir_a[i] || b != reservoir_b[i])
+            reservoirs_valid = false;
+        reservoir_a[i] = a;
+        reservoir_b[i] = b;
+    }
+
     if (!done)
-        trace(rd, pipe, use_hardware, size, frame_color, frame_motion, frame_albedo, gbuffer_textures[write_slot]);
+    {
+        TypedArray<RDUniform> set0;
+        set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_UNIFORM_BUFFER, 0, {frame_buffer.rid()}));
+        const RID images[] = {frame_color, frame_motion, frame_albedo, gbuffer_textures[write_slot],
+                              gi_hit,      gi_sample,    gi_radiance,  di_hit_a,
+                              di_hit_b};
+        for (int i = 0; i < 9; i++)
+            set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, i + 1, {images[i]}));
+        set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 10, {surface}));
+        rd->capture_timestamp("PT begin");
+        dispatch_scene(rd, pipe, use_hardware, size, set0, PackedByteArray());
+        rd->capture_timestamp("PT trace");
+
+        if (restir)
+        {
+            // Temporal reuse merges the new samples with last frame's final reservoirs (read slot)
+            // into scratch reservoirs; the spatial pass resamples those across neighbours, adds the
+            // shaded GI to the frame color and writes this frame's final reservoirs (write slot).
+            TypedArray<RDUniform> rset0;
+            rset0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_UNIFORM_BUFFER, 0, {frame_buffer.rid()}));
+            const RID rimages[] = {frame_color,
+                                   frame_motion,
+                                   gbuffer_textures[write_slot],
+                                   gbuffer_textures[read_slot],
+                                   gi_hit,
+                                   gi_sample,
+                                   gi_radiance,
+                                   reservoir_a[read_slot],
+                                   reservoir_b[read_slot],
+                                   reservoir_temp_a,
+                                   reservoir_temp_b};
+            for (int i = 0; i < 11; i++)
+                rset0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, i + 1, {rimages[i]}));
+            rset0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 13, {reservoir_a[write_slot]}));
+            rset0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 14, {reservoir_b[write_slot]}));
+            const RID di_images[] = {di_hit_a,
+                                     di_hit_b,
+                                     di_reservoir_a[read_slot],
+                                     di_reservoir_b[read_slot],
+                                     di_temp_a,
+                                     di_temp_b,
+                                     di_reservoir_a[write_slot],
+                                     di_reservoir_b[write_slot]};
+            for (int i = 0; i < 8; i++)
+                rset0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 15 + i, {di_images[i]}));
+            rset0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 23, {surface}));
+
+            RestirParams params{};
+            // Reservoir reuse only needs valid motion, so it also runs without accumulation.
+            const bool reuse_ok = current.temporal_reprojection && !current_reset;
+            const uint32_t selection = current.restir_guided_selection ? 0u : RESTIR_FLAG_UNIFORM;
+            params.di_candidates = current.restir_di_candidates;
+            params.candidates = current.restir_candidates;
+            params.neighbors = current.restir_neighbors;
+            params.radius = current.restir_radius;
+            params.omega = 0.05f; // paper's values
+            params.beta = 8.0f;
+            params.max_confidence = 20.0f;
+            // GI first, then DI; both add their shading to the frame color.
+            for (uint32_t mode : {RESTIR_TEMPORAL, RESTIR_SPATIAL, RESTIR_DI_TEMPORAL, RESTIR_DI_SPATIAL})
+            {
+                const bool di_mode = mode >= RESTIR_DI_TEMPORAL;
+                if (di_mode ? !restir_di : !restir_gi)
+                    continue;
+                const bool reuse = reuse_ok && (di_mode ? di_reservoirs_valid : reservoirs_valid);
+                params.flags = (reuse ? RESTIR_FLAG_TEMPORAL : 0u) | selection;
+                params.mode = mode;
+                restir_params[mode].upload(rd, to_bytes(&params, 1));
+                TypedArray<RDUniform> set0 = rset0.duplicate();
+                set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_UNIFORM_BUFFER, 12,
+                                            {restir_params[mode].rid()}));
+                dispatch_scene(rd, use_hardware ? restir_hw[mode] : restir_sw[mode], use_hardware, size, set0,
+                               PackedByteArray());
+                static const char *const MODE_NAMES[] = {"PT restir gi temporal", "PT restir gi spatial",
+                                                         "PT restir di temporal", "PT restir di spatial"};
+                rd->capture_timestamp(MODE_NAMES[mode]);
+            }
+        }
+        reservoirs_valid = restir_gi;
+        di_reservoirs_valid = restir_di;
+    }
 
     // Temporal resolve: history (read slot) + this frame -> history (write slot) and the color buffer.
     {
         ResolveParams params{};
         params.size[0] = size.x;
         params.size[1] = size.y;
-        params.flags = (temporal ? FLAG_REPROJECT : 0u) | (done ? FLAG_COPY_ONLY : 0u) | (reset ? FLAG_RESET : 0u);
+        params.flags = (temporal ? FLAG_REPROJECT : 0u) | (done ? FLAG_COPY_ONLY : 0u) | (reset ? FLAG_RESET : 0u) |
+                       (!changed && motion_cooldown == 0 ? FLAG_STATIC : 0u);
         params.history_cap = history_cap;
         const RID images[] = {frame_color,
                               frame_motion,
@@ -697,13 +963,18 @@ void PathTracingEffect::_render_callback(int32_t p_effect_callback_type, RenderD
         for (int i = 0; i < 10; i++)
             uniforms.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, i, {images[i]}));
         dispatch_compute(rd, resolver, uniforms, to_bytes(&params, 1), size);
+        rd->capture_timestamp("PT resolve");
     }
 
     // Spatial denoising of the accumulated image. When `done`, the history was not rewritten this
     // frame and the final image lives in the read slot.
     if (current.denoise && current.denoise_iterations > 0 && current.debug_mode == 0 &&
         ensure_pipeline(rd, denoiser, dn_file, "jar_path_tracing_denoise"))
-        run_denoiser(rd, buffers, size, done ? read_slot : write_slot, current.denoise_iterations);
+    {
+        run_denoiser(rd, buffers, size, done ? read_slot : write_slot, current.denoise_iterations, cam_transform,
+                     projection);
+        rd->capture_timestamp("PT denoise");
+    }
 
     if (!done)
     {
@@ -725,16 +996,10 @@ void PathTracingEffect::dispatch_compute(RenderingDevice *rd, const Pipeline &p,
     rd->compute_list_end();
 }
 
-void PathTracingEffect::trace(RenderingDevice *rd, const Pipeline &pipe, bool use_hardware, const Vector2i &size,
-                              RID frame_color, RID frame_motion, RID frame_albedo, RID gbuffer)
+void PathTracingEffect::dispatch_scene(RenderingDevice *rd, const Pipeline &pipe, bool use_hardware,
+                                       const Vector2i &size, const TypedArray<RDUniform> &set0,
+                                       const PackedByteArray &push_constant)
 {
-    TypedArray<RDUniform> set0;
-    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_UNIFORM_BUFFER, 0, {frame_buffer.rid()}));
-    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 1, {frame_color}));
-    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 2, {frame_motion}));
-    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 3, {frame_albedo}));
-    set0.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_IMAGE, 4, {gbuffer}));
-
     TypedArray<RDUniform> set1;
     const RID storage[] = {bvh_buffer.rid(),      triangle_buffer.rid(), triangle_data_buffer.rid(),
                            material_buffer.rid(), instance_material_buffer.rid(), instance_buffer.rid(),
@@ -744,10 +1009,13 @@ void PathTracingEffect::trace(RenderingDevice *rd, const Pipeline &pipe, bool us
         set1.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_STORAGE_BUFFER, i, {storage[i]}));
     if (use_hardware)
         set1.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 10, {hw_tlas}));
+    set1.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_STORAGE_BUFFER, 11, {environment_cdf.rid()}));
 
     ensure_sampler(rd);
     TypedArray<RDUniform> set2;
     set2.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, {sampler, texture_array}));
+    set2.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, {sampler, data_texture_array}));
+    set2.push_back(make_uniform(RenderingDevice::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, {sampler, environment_texture}));
 
     RID us0 = UniformSetCacheRD::get_cache(pipe.shader, 0, set0);
     RID us1 = UniformSetCacheRD::get_cache(pipe.shader, 1, set1);
@@ -760,6 +1028,8 @@ void PathTracingEffect::trace(RenderingDevice *rd, const Pipeline &pipe, bool us
         rd->raytracing_list_bind_uniform_set(list, us0, 0);
         rd->raytracing_list_bind_uniform_set(list, us1, 1);
         rd->raytracing_list_bind_uniform_set(list, us2, 2);
+        if (!push_constant.is_empty())
+            rd->raytracing_list_set_push_constant(list, push_constant, static_cast<uint32_t>(push_constant.size()));
         rd->raytracing_list_trace_rays(list, 0, pipe.sbt, size.x, size.y, 1);
         rd->raytracing_list_end();
     }
@@ -770,6 +1040,8 @@ void PathTracingEffect::trace(RenderingDevice *rd, const Pipeline &pipe, bool us
         rd->compute_list_bind_uniform_set(list, us0, 0);
         rd->compute_list_bind_uniform_set(list, us1, 1);
         rd->compute_list_bind_uniform_set(list, us2, 2);
+        if (!push_constant.is_empty())
+            rd->compute_list_set_push_constant(list, push_constant, static_cast<uint32_t>(push_constant.size()));
         rd->compute_list_dispatch(list, (size.x + 7) / 8, (size.y + 7) / 8, 1);
         rd->compute_list_end();
     }

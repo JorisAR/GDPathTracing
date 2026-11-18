@@ -12,6 +12,8 @@
 
 #define TLAS_LEAF 0xFFFFFFFFu
 #define INSTANCE_FLAG_EMISSIVE 1u
+#define MATERIAL_FLAG_EMISSION_MULTIPLY 1u
+#define MATERIAL_FLAG_NORMAL_DIRECTX 2u
 
 #define LIGHT_DIRECTIONAL 0u
 #define LIGHT_OMNI 1u
@@ -32,7 +34,7 @@ struct TLASNode {
 };
 
 struct Triangle {
-    vec4 v0;
+    vec4 v0; // w = 1: alpha tested (some instance's material has alpha below one)
     vec4 e1;
     vec4 e2;
 };
@@ -40,12 +42,12 @@ struct Triangle {
 struct TriangleData {
     vec3 n0;
     uint surface;
-    vec4 n1;
-    vec4 n2;
+    vec4 n1; // w = tangent.x
+    vec4 n2; // w = tangent.y
     vec2 uv0;
     vec2 uv1;
     vec2 uv2;
-    vec2 pad;
+    vec2 tangent_z_sign; // x = tangent.z, y = bitangent sign (object space, per triangle)
 };
 
 struct Material {
@@ -56,6 +58,14 @@ struct Material {
     int albedo_texture;
     uint flags;
     vec4 uv_scale_offset;
+    int emission_texture; // -1 = none
+    float emission_energy;
+    int roughness_texture; // layers in data_textures, -1 = none
+    int metallic_texture;
+    int normal_texture;
+    uint channels;         // bits 0-2 roughness channel, 3-5 metallic channel (Godot TextureChannel)
+    float alpha_cutoff;    // > 0 alpha scissor threshold, < 0 stochastic alpha, 0 = opaque
+    float normal_scale;
 };
 
 struct Instance {
@@ -66,13 +76,24 @@ struct Instance {
     uint material_offset;
     uint triangle_offset;
     uint flags;
+    uint emissive_offset; // first entry of this instance in emissive_triangles (emissive instances)
+    uint pad0;
+    uint pad1;
+    uint pad2;
 };
 
 struct EmissiveTriangle {
-    uint instance;
-    uint triangle;
-    float cdf;
-    float power;
+    vec3 v0;          // world space
+    float power;      // luminance(emission) * world area
+    vec3 e1;          // world space v1 - v0
+    float alias_prob; // alias table: keep this entry with this probability...
+    vec3 e2;          // world space v2 - v0
+    uint alias;       // ...otherwise use this one
+    vec2 uv0;
+    vec2 uv1;
+    vec2 uv2;
+    uint material;
+    uint pad;
 };
 
 struct PunctualLight {
@@ -122,14 +143,32 @@ layout(set = 0, binding = 0, std140) uniform FrameData {
     uint portal_count;
     uint max_portal_hops;
     uint pad0;
+    vec4 env_params; // energy, rotation (radians about +Y), integral of the sampling weights
+    ivec4 env_size;  // width, height
 } frame;
 
+#define FLAG_RESTIR 1u      // the trace pass splits off a reusable GI sample for restir.glsl
+#define FLAG_ENVIRONMENT 2u // an environment map replaces the gradient sky (importance sampled)
+#define FLAG_RESTIR_DI 4u   // direct light from emitters / environment at x1 comes from restir_di.glsli
+
+#ifndef RESTIR_PASS
 // Outputs of the tracing pass. Accumulation happens afterwards in resolve.glsl; keeping this
 // pass free of history reads keeps the (large) tracing kernel small.
 layout(set = 0, binding = 1, rgba32f) uniform restrict writeonly image2D frame_color;  // rgb this frame's radiance
 layout(set = 0, binding = 2, rgba32f) uniform restrict writeonly image2D frame_motion; // xy previous pixel, z expected previous distance (-1 sky), w 1 = valid
 layout(set = 0, binding = 3, rgba32f) uniform restrict writeonly image2D frame_albedo; // rgb primary albedo
 layout(set = 0, binding = 4, rgba32f) uniform restrict writeonly image2D gbuffer_out;  // xyz normal, w distance (-1 = sky)
+// ReSTIR GI inputs (only written with FLAG_RESTIR). See restir.glsli.
+layout(set = 0, binding = 5, rgba32f) uniform restrict writeonly image2D gi_hit_out;    // primary hit: xyz world position, w packed geometric normal (< 0 = no reuse)
+layout(set = 0, binding = 6, rgba32f) uniform restrict writeonly image2D gi_sample_out; // xyz secondary hit x2, w source pdf (0 = no sample)
+layout(set = 0, binding = 7, rgba32f) uniform restrict writeonly image2D gi_radiance_out; // rgb radiance leaving x2 towards x1, w packed normal at x2
+// ReSTIR DI: what the BSDF ray from x1 found, if it is a light (an emitter or the environment).
+layout(set = 0, binding = 8, rgba32f) uniform restrict writeonly image2D di_hit_a_out; // xyz light point (or direction), w light sampling pdf (< 0: none)
+layout(set = 0, binding = 9, rgba32f) uniform restrict writeonly image2D di_hit_b_out; // rgb emitted radiance, w packed light normal (-1: environment)
+// Material at a reusable primary hit (half floats), so the ReSTIR passes skip texture lookups:
+// x = diffuse.rg, y = (diffuse.b, GGX alpha), z = F0.rg, w = (F0.b, 0).
+layout(set = 0, binding = 10, rgba32ui) uniform restrict writeonly uimage2D surface_out;
+#endif
 
 layout(set = 1, binding = 0, std430) restrict readonly buffer BVHNodes { BVHNode bvh_nodes[]; };
 layout(set = 1, binding = 1, std430) restrict readonly buffer Triangles { Triangle triangles[]; };
@@ -141,8 +180,13 @@ layout(set = 1, binding = 6, std430) restrict readonly buffer TLASNodes { TLASNo
 layout(set = 1, binding = 7, std430) restrict readonly buffer EmissiveTriangles { EmissiveTriangle emissive_triangles[]; };
 layout(set = 1, binding = 8, std430) restrict readonly buffer PunctualLights { PunctualLight punctual_lights[]; };
 layout(set = 1, binding = 9, std430) restrict readonly buffer Portals { Portal portals[]; };
+// Environment importance sampling: an alias table with one (keep probability as float bits, alias)
+// pair per texel, row major. See src/path_tracing/environment.h.
+layout(set = 1, binding = 11, std430) restrict readonly buffer EnvironmentAlias { uvec2 env_alias[]; };
 
-layout(set = 2, binding = 0) uniform sampler2DArray albedo_textures;
+layout(set = 2, binding = 0) uniform sampler2DArray albedo_textures; // sRGB colors (albedo, emission)
+layout(set = 2, binding = 1) uniform sampler2DArray data_textures;   // linear: roughness, metallic, normals
+layout(set = 2, binding = 2) uniform sampler2D environment_map;      // equirect, linear RGB
 
 // ----------------------------------- HELPERS -----------------------------------
 
@@ -177,6 +221,11 @@ float luminance(vec3 c) {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
 }
 
+vec2 material_uv(const Material m, const TriangleData td, vec2 bary) {
+    vec2 uv = td.uv0 * (1.0 - bary.x - bary.y) + td.uv1 * bary.x + td.uv2 * bary.y;
+    return uv * m.uv_scale_offset.xy + m.uv_scale_offset.zw;
+}
+
 // ----------------------------------- RANDOM -----------------------------------
 
 uint pcg_hash(uint v) {
@@ -192,8 +241,34 @@ float rand(inout uint state) {
     return float(word >> 8u) * (1.0 / 16777216.0);
 }
 
+// Uniform integer in [0, n) (modulo bias at most n / 2^32).
+uint rand_index(inout uint state, uint n) {
+    state = state * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return ((word >> 22u) ^ word) % max(n, 1u);
+}
+
 vec2 rand2(inout uint state) {
     return vec2(rand(state), rand(state));
+}
+
+// Alpha test: false if the hit at `bary` on `triangle` of `instance` is (this frame) transparent.
+// alpha = albedo color alpha * albedo texture alpha. A positive cutoff is an alpha scissor
+// threshold; a negative one means stochastic transparency (alpha blend / hash / depth prepass):
+// the surface is kept with probability alpha, which converges to the blended result.
+bool alpha_test_pass(uint instance, uint triangle, vec2 bary) {
+    Instance inst = instances[instance];
+    TriangleData td = triangle_data[triangle];
+    Material m = materials[instance_materials[inst.material_offset + td.surface]];
+    if (m.alpha_cutoff == 0.0) return true;
+    float a = m.albedo.a;
+    if (m.albedo_texture >= 0)
+        a *= textureLod(albedo_textures, vec3(material_uv(m, td, bary), float(m.albedo_texture)), 0.0).a;
+    if (m.alpha_cutoff > 0.0) return a >= m.alpha_cutoff;
+    // Same point, same frame: same answer (closest and shadow rays agree); new pattern each frame.
+    uvec2 q = uvec2(clamp(bary, 0.0, 1.0) * 65535.0);
+    uint h = pcg_hash(triangle ^ pcg_hash(q.x | (q.y << 16u)) ^ pcg_hash(frame.frame_index ^ 0x9e3779b9u));
+    return float(h >> 8u) * (1.0 / 16777216.0) < a;
 }
 
 // Orthonormal basis around n (Duff et al. 2017).
@@ -208,6 +283,24 @@ vec2 sample_disk(vec2 u) {
     float r = sqrt(u.x);
     float phi = 2.0 * M_PI * u.y;
     return r * vec2(cos(phi), sin(phi));
+}
+
+// Octahedral normal encoding (2 x 12 bits) stored as an integer-valued float, exact below 2^24.
+// Bit-casting packed integers to floats is not safe in float images: small values are denormals
+// that GPUs flush to zero.
+float pack_normal(vec3 n) {
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    vec2 e = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    uvec2 q = uvec2(round(clamp(e * 0.5 + 0.5, 0.0, 1.0) * 4095.0));
+    return float(q.x * 4096u + q.y);
+}
+
+vec3 unpack_normal(float f) {
+    uint u = uint(f);
+    vec2 e = vec2(float(u >> 12u), float(u & 4095u)) / 4095.0 * 2.0 - 1.0;
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    return normalize(n);
 }
 
 vec3 sample_sphere(vec2 u) {

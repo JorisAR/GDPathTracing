@@ -46,6 +46,8 @@ class GeometryGroup3D : public Node3D
     Ref<BaseMaterial3D> get_default_material() const;
     void set_default_material(const Ref<BaseMaterial3D> &value);
 
+    bool get_directx_normal_maps() const;
+    void set_directx_normal_maps(bool value);
     int get_texture_resolution() const;
     void set_texture_resolution(int value);
 
@@ -78,6 +80,7 @@ class GeometryGroup3D : public Node3D
         uint32_t material_offset = 0;
         bool emissive = false;
         bool visible = false;
+        std::vector<float> tri_emission; // emissive instances: luminance per mesh triangle (BVH order)
         Transform3D transform;
         Transform3D prev_transform;
     };
@@ -85,6 +88,7 @@ class GeometryGroup3D : public Node3D
     void collect(std::vector<Node *> &mesh_nodes, std::vector<Node *> &light_nodes);
     uint32_t get_material_index(const Ref<Material> &material);
     int get_texture_index(const Ref<Texture2D> &texture);
+    int get_data_texture_index(const Ref<Texture2D> &texture);
     int add_mesh(const Ref<Mesh> &mesh);
     PackedByteArray build_light_buffer(uint32_t &count);
     PackedByteArray build_portal_buffer(uint32_t &count);
@@ -104,6 +108,8 @@ class GeometryGroup3D : public Node3D
     std::vector<PT::GpuMaterial> materials;
     std::vector<uint32_t> instance_materials;
     std::vector<Ref<Texture2D>> texture_refs;
+    std::vector<Ref<Texture2D>> data_texture_refs;
+    bool directx_normal_maps = false;
 
     uint32_t total_triangles = 0;
     uint32_t visible_instances = 0;

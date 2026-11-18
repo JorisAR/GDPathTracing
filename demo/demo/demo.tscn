@@ -4,8 +4,8 @@
 [ext_resource type="ArrayMesh" uid="uid://c8s1c6pob6ry1" path="res://demo/geometry/suzanne.obj" id="3_rovw5"]
 [ext_resource type="ArrayMesh" uid="uid://teo4lnhxisnh" path="res://demo/geometry/cornell.obj" id="4_5j87i"]
 [ext_resource type="Script" uid="uid://b7icuble3ehmr" path="res://demo/fps_meter.gd" id="4_w0fmn"]
-[ext_resource type="Script" path="res://demo/animator.gd" id="5_anim"]
-[ext_resource type="Script" path="res://demo/capture.gd" id="6_capt"]
+[ext_resource type="Script" uid="uid://cisxmgeae7upb" path="res://demo/animator.gd" id="5_anim"]
+[ext_resource type="Script" uid="uid://c6uf10upvr1ux" path="res://demo/capture.gd" id="6_capt"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_tctin"]
 
@@ -45,38 +45,37 @@ emission_energy_multiplier = 0.4
 metallic = 1.0
 roughness = 0.16
 
-[node name="Demo" type="Node3D"]
+[node name="Demo" type="Node3D" unique_id=241887734]
 
-[node name="Camera3D" type="PathTracingCamera" parent="." node_paths=PackedStringArray("geometry_group")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 6.5)
-fov = 60.0
+[node name="Camera3D" type="PathTracingCamera" parent="." unique_id=1576808569 node_paths=PackedStringArray("geometry_group")]
 geometry_group = NodePath("../GeometryGroup3D")
 max_bounces = 5
 firefly_clamp = 20.0
 sky_energy = 0.5
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 6.5)
+fov = 60.0
 script = ExtResource("2_kdd2p")
 move_speed = 2.0
 
-[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=46074997]
 environment = SubResource("Environment_tn4qg")
 
-[node name="GeometryGroup3D" type="GeometryGroup3D" parent="."]
+[node name="GeometryGroup3D" type="GeometryGroup3D" parent="." unique_id=1168632862]
 default_material = SubResource("StandardMaterial3D_avnmi")
-texture_array_resolution = 1024
 
-[node name="Light" type="MeshInstance3D" parent="GeometryGroup3D"]
+[node name="Light" type="MeshInstance3D" parent="GeometryGroup3D" unique_id=365092873]
 transform = Transform3D(1, 0, 0, 0, -1, 1.50996e-07, 0, -1.50996e-07, -1, 0, 2.95581, 0)
 mesh = SubResource("PlaneMesh_oeqrt")
 surface_material_override/0 = SubResource("StandardMaterial3D_1rqa4")
 
-[node name="Box" type="MeshInstance3D" parent="GeometryGroup3D"]
+[node name="Box" type="MeshInstance3D" parent="GeometryGroup3D" unique_id=1372434365]
 transform = Transform3D(-2.62268e-08, 0, -0.6, 0, 0.6, 0, 0.6, 0, -2.62268e-08, 0, 0, 0)
 mesh = ExtResource("4_5j87i")
 surface_material_override/0 = SubResource("StandardMaterial3D_oeqrt")
 surface_material_override/1 = SubResource("StandardMaterial3D_3ix6a")
 surface_material_override/2 = SubResource("StandardMaterial3D_spnlb")
 
-[node name="Suzanne" type="MeshInstance3D" parent="GeometryGroup3D"]
+[node name="Suzanne" type="MeshInstance3D" parent="GeometryGroup3D" unique_id=1950865819]
 transform = Transform3D(0.982635, -0.208021, 0.656626, 0.0853118, 1.17191, 0.243597, -0.68348, -0.152791, 0.974428, -1.16402, -1.55573, -0.923088)
 mesh = ExtResource("3_rovw5")
 surface_material_override/0 = SubResource("StandardMaterial3D_ykvhj")
@@ -84,14 +83,14 @@ script = ExtResource("5_anim")
 spin_speed = Vector3(0, 0.5, 0)
 bob_amplitude = Vector3(0, 0.3, 0)
 
-[node name="Suzanne2" type="MeshInstance3D" parent="GeometryGroup3D"]
+[node name="Suzanne2" type="MeshInstance3D" parent="GeometryGroup3D" unique_id=1545470998]
 transform = Transform3D(0.934979, 0.0872355, -0.747128, 0.0853118, 1.17191, 0.243597, 0.74735, -0.242915, 0.906899, 1.27032, -0.951083, -0.923088)
 mesh = ExtResource("3_rovw5")
 surface_material_override/0 = SubResource("StandardMaterial3D_j5lb4")
 script = ExtResource("5_anim")
 spin_speed = Vector3(0, -0.4, 0)
 
-[node name="Label" type="Label" parent="." node_paths=PackedStringArray("camera", "geometry_group")]
+[node name="Label" type="Label" parent="." unique_id=1640160897 node_paths=PackedStringArray("camera", "geometry_group")]
 offset_left = 8.0
 offset_top = 8.0
 offset_right = 48.0
@@ -100,5 +99,5 @@ script = ExtResource("4_w0fmn")
 camera = NodePath("../Camera3D")
 geometry_group = NodePath("../GeometryGroup3D")
 
-[node name="Capture" type="Node" parent="."]
+[node name="Capture" type="Node" parent="." unique_id=259542884]
 script = ExtResource("6_capt")

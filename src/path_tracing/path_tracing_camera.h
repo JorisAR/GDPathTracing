@@ -65,6 +65,12 @@ class PathTracingCamera : public Camera3D
     void set_ground_color(const Color &value);
     float get_sky_energy() const;
     void set_sky_energy(float value);
+    Ref<Texture2D> get_environment_map() const;
+    void set_environment_map(const Ref<Texture2D> &value);
+    float get_environment_energy() const;
+    void set_environment_energy(float value);
+    float get_environment_rotation() const;
+    void set_environment_rotation(float value);
 
     Backend get_backend() const;
     void set_backend(Backend value);
@@ -74,6 +80,20 @@ class PathTracingCamera : public Camera3D
     void set_temporal_max_history(int value);
     int get_max_portal_hops() const;
     void set_max_portal_hops(int value);
+    bool get_restir_gi() const;
+    void set_restir_gi(bool value);
+    int get_restir_neighbors() const;
+    void set_restir_neighbors(int value);
+    int get_restir_candidates() const;
+    void set_restir_candidates(int value);
+    float get_restir_radius() const;
+    void set_restir_radius(float value);
+    bool get_restir_di() const;
+    void set_restir_di(bool value);
+    int get_restir_di_candidates() const;
+    void set_restir_di_candidates(int value);
+    bool get_restir_guided_selection() const;
+    void set_restir_guided_selection(bool value);
     bool get_denoise() const;
     void set_denoise(bool value);
     int get_denoise_iterations() const;
@@ -100,6 +120,9 @@ class PathTracingCamera : public Camera3D
     bool path_tracing_enabled = true;
     PT::RenderSettings settings;
     Ref<PathTracingEffect> effect;
+    Ref<Texture2D> environment_map;
+    PT::EnvironmentPtr environment;
+    uint64_t environment_version = 0;
 
     // Editor preview state.
     bool editor_preview = false;

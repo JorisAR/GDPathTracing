@@ -15,6 +15,8 @@ static const char *SHADER_PATH = "res://addons/jar_path_tracing/src/shaders/main
 static const char *HW_SHADER_PATH = "res://addons/jar_path_tracing/src/shaders/main_hw.glsl";
 static const char *RESOLVE_SHADER_PATH = "res://addons/jar_path_tracing/src/shaders/resolve.glsl";
 static const char *DENOISE_SHADER_PATH = "res://addons/jar_path_tracing/src/shaders/denoise.glsl";
+static const char *RESTIR_SHADER_PATH = "res://addons/jar_path_tracing/src/shaders/restir.glsl";
+static const char *RESTIR_HW_SHADER_PATH = "res://addons/jar_path_tracing/src/shaders/restir_hw.glsl";
 
 void PathTracingCamera::_bind_methods()
 {
@@ -38,6 +40,15 @@ void PathTracingCamera::_bind_methods()
     PT_PROP(Variant::INT, debug_view, PROPERTY_HINT_ENUM, "None,Normals,Albedo,Traversal Cost")
     PT_PROP(Variant::INT, max_portal_hops, PROPERTY_HINT_RANGE, "0,64,1")
 
+    ADD_GROUP("ReSTIR GI", "restir_");
+    PT_PROP(Variant::BOOL, restir_gi, PROPERTY_HINT_NONE, "")
+    PT_PROP(Variant::INT, restir_neighbors, PROPERTY_HINT_RANGE, "0,2,1")
+    PT_PROP(Variant::INT, restir_candidates, PROPERTY_HINT_RANGE, "1,64,1")
+    PT_PROP(Variant::FLOAT, restir_radius, PROPERTY_HINT_RANGE, "1,200,1")
+    PT_PROP(Variant::BOOL, restir_guided_selection, PROPERTY_HINT_NONE, "")
+    PT_PROP(Variant::BOOL, restir_di, PROPERTY_HINT_NONE, "")
+    PT_PROP(Variant::INT, restir_di_candidates, PROPERTY_HINT_RANGE, "1,32,1")
+
     ADD_GROUP("Denoising", "");
     PT_PROP(Variant::BOOL, denoise, PROPERTY_HINT_NONE, "")
     PT_PROP(Variant::INT, denoise_iterations, PROPERTY_HINT_RANGE, "1,6,1")
@@ -47,6 +58,10 @@ void PathTracingCamera::_bind_methods()
     PT_PROP(Variant::COLOR, sky_horizon_color, PROPERTY_HINT_NONE, "")
     PT_PROP(Variant::COLOR, ground_color, PROPERTY_HINT_NONE, "")
     PT_PROP(Variant::FLOAT, sky_energy, PROPERTY_HINT_RANGE, "0,16,0.01,or_greater")
+    // An equirectangular (panorama) HDR replaces the gradient sky and is importance sampled.
+    PT_PROP(Variant::OBJECT, environment_map, PROPERTY_HINT_RESOURCE_TYPE, "Texture2D")
+    PT_PROP(Variant::FLOAT, environment_energy, PROPERTY_HINT_RANGE, "0,64,0.01,or_greater")
+    PT_PROP(Variant::FLOAT, environment_rotation, PROPERTY_HINT_RANGE, "-360,360,0.1,degrees")
 #undef PT_PROP
 
     ADD_GROUP("Editor", "");
@@ -140,10 +155,12 @@ Ref<PathTracingEffect> PathTracingCamera::create_effect()
     Ref<RDShaderFile> hw_shader_file = ResourceLoader::get_singleton()->load(HW_SHADER_PATH);
     Ref<RDShaderFile> resolve_file = ResourceLoader::get_singleton()->load(RESOLVE_SHADER_PATH);
     Ref<RDShaderFile> denoise_file = ResourceLoader::get_singleton()->load(DENOISE_SHADER_PATH);
+    Ref<RDShaderFile> restir_file = ResourceLoader::get_singleton()->load(RESTIR_SHADER_PATH);
+    Ref<RDShaderFile> restir_hw_file = ResourceLoader::get_singleton()->load(RESTIR_HW_SHADER_PATH);
 
     Ref<PathTracingEffect> e;
     e.instantiate();
-    e->set_shader_files(shader_file, hw_shader_file, resolve_file, denoise_file);
+    e->set_shader_files(shader_file, hw_shader_file, resolve_file, denoise_file, restir_file, restir_hw_file);
     return e;
 }
 
@@ -178,6 +195,7 @@ void PathTracingCamera::push_settings()
         return;
     effect->set_enabled(path_tracing_enabled);
     effect->set_settings(settings);
+    effect->set_environment(environment);
     if (geometry_group != nullptr)
         effect->set_scene(geometry_group->get_scene_data());
 }
@@ -381,6 +399,34 @@ void PathTracingCamera::set_sky_energy(float value)
     settings.sky_energy = MAX(0.0f, value);
 }
 
+Ref<Texture2D> PathTracingCamera::get_environment_map() const
+{
+    return environment_map;
+}
+void PathTracingCamera::set_environment_map(const Ref<Texture2D> &value)
+{
+    environment_map = value;
+    // Prepared here on the main thread (downsampling and sampling tables), once per change.
+    environment = PT::build_environment(value, ++environment_version);
+    push_settings();
+}
+float PathTracingCamera::get_environment_energy() const
+{
+    return settings.environment_energy;
+}
+void PathTracingCamera::set_environment_energy(float value)
+{
+    settings.environment_energy = MAX(0.0f, value);
+}
+float PathTracingCamera::get_environment_rotation() const
+{
+    return Math::rad_to_deg(settings.environment_rotation);
+}
+void PathTracingCamera::set_environment_rotation(float value)
+{
+    settings.environment_rotation = Math::deg_to_rad(value);
+}
+
 PathTracingCamera::Backend PathTracingCamera::get_backend() const
 {
     return static_cast<Backend>(settings.backend);
@@ -428,6 +474,62 @@ int PathTracingCamera::get_denoise_iterations() const
 void PathTracingCamera::set_denoise_iterations(int value)
 {
     settings.denoise_iterations = CLAMP(value, 1, 6);
+}
+bool PathTracingCamera::get_restir_gi() const
+{
+    return settings.restir_gi;
+}
+void PathTracingCamera::set_restir_gi(bool value)
+{
+    settings.restir_gi = value;
+}
+int PathTracingCamera::get_restir_neighbors() const
+{
+    return settings.restir_neighbors;
+}
+void PathTracingCamera::set_restir_neighbors(int value)
+{
+    settings.restir_neighbors = CLAMP(value, 0, 2);
+}
+int PathTracingCamera::get_restir_candidates() const
+{
+    return settings.restir_candidates;
+}
+void PathTracingCamera::set_restir_candidates(int value)
+{
+    settings.restir_candidates = CLAMP(value, 1, 64);
+}
+float PathTracingCamera::get_restir_radius() const
+{
+    return settings.restir_radius;
+}
+void PathTracingCamera::set_restir_radius(float value)
+{
+    settings.restir_radius = CLAMP(value, 1.0f, 200.0f);
+}
+bool PathTracingCamera::get_restir_guided_selection() const
+{
+    return settings.restir_guided_selection;
+}
+void PathTracingCamera::set_restir_guided_selection(bool value)
+{
+    settings.restir_guided_selection = value;
+}
+bool PathTracingCamera::get_restir_di() const
+{
+    return settings.restir_di;
+}
+void PathTracingCamera::set_restir_di(bool value)
+{
+    settings.restir_di = value;
+}
+int PathTracingCamera::get_restir_di_candidates() const
+{
+    return settings.restir_di_candidates;
+}
+void PathTracingCamera::set_restir_di_candidates(int value)
+{
+    settings.restir_di_candidates = CLAMP(value, 1, 32);
 }
 String PathTracingCamera::get_active_backend() const
 {

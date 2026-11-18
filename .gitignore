@@ -53,3 +53,7 @@ Thumbs.db
 desktop.ini
 vc140.pdb
 src/**/*.obj
+
+# Amazon Lumberyard Bistro (1.7 GB, downloaded separately; see demo/bistro/README.md)
+/demo/bistro/*
+!/demo/bistro/README.md

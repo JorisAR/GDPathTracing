@@ -1,0 +1,732 @@
+// Path tracing integrator, shared by the software (main.glsl) and hardware (main_hw.glsl)
+// entry points. Expects common.glsli, brdfs.glsli and a trace_*.glsli providing
+// trace_closest() / trace_any() to be included first.
+
+// PIXEL_ID must be defined by the entry point (compute invocation or ray launch id).
+
+// ----------------------------------- SCENE QUERIES -----------------------------------
+
+// ---- environment map (equirectangular, +Y up, u = 0.5 looking down -Z) ----
+
+vec3 rotate_y(vec3 d, float a) {
+    float c = cos(a), s = sin(a);
+    return vec3(d.x * c + d.z * s, d.y, -d.x * s + d.z * c);
+}
+
+ivec2 env_texel(vec3 d) {
+    d = rotate_y(d, -frame.env_params.y);
+    float u = atan(d.x, -d.z) * (0.5 / M_PI) + 0.5;
+    float v = acos(clamp(d.y, -1.0, 1.0)) / M_PI;
+    return clamp(ivec2(vec2(u, v) * vec2(frame.env_size.xy)), ivec2(0), frame.env_size.xy - 1);
+}
+
+// Solid angle pdf of sample_environment() picking direction d (piecewise constant per texel).
+float env_pdf(vec3 d) {
+    if ((frame.flags & FLAG_ENVIRONMENT) == 0u || frame.env_params.z <= 0.0) return 0.0;
+    float l = luminance(texelFetch(environment_map, env_texel(d), 0).rgb);
+    return l * float(frame.env_size.x * frame.env_size.y) / (frame.env_params.z * 2.0 * M_PI * M_PI);
+}
+
+// Picks a direction proportional to luminance * sin(theta); returns it with its radiance and pdf.
+vec3 sample_environment_dir(inout uint rng, out vec3 radiance, out float pdf) {
+    uint w = uint(frame.env_size.x);
+    uint h = uint(frame.env_size.y);
+    uint index = rand_index(rng, w * h);
+    uvec2 entry = env_alias[index];
+    if (rand(rng) >= uintBitsToFloat(entry.x)) index = entry.y;
+    uint row = index / w;
+    uint col = index - row * w;
+    vec2 uv = (vec2(col, row) + rand2(rng)) / vec2(w, h);
+    float theta = uv.y * M_PI;
+    float phi = (uv.x - 0.5) * 2.0 * M_PI;
+    vec3 d = rotate_y(vec3(sin(theta) * sin(phi), cos(theta), -sin(theta) * cos(phi)), frame.env_params.y);
+    vec3 texel = texelFetch(environment_map, ivec2(col, row), 0).rgb;
+    radiance = texel * frame.env_params.x;
+    pdf = luminance(texel) * float(w * h) / (frame.env_params.z * 2.0 * M_PI * M_PI);
+    return d;
+}
+
+vec3 sample_sky(vec3 d) {
+    if ((frame.flags & FLAG_ENVIRONMENT) != 0u) {
+        return texelFetch(environment_map, env_texel(d), 0).rgb * frame.env_params.x;
+    }
+    if (d.y >= 0.0) {
+        return mix(frame.sky_horizon.rgb, frame.sky_top.rgb, sqrt(d.y));
+    }
+    return mix(frame.sky_horizon.rgb, frame.ground.rgb, sqrt(min(1.0, -d.y * 4.0)));
+}
+
+float triangle_world_area(const Instance inst, const Triangle tri) {
+    vec3 e1 = xform_vector(inst.o2w, tri.e1.xyz);
+    vec3 e2 = xform_vector(inst.o2w, tri.e2.xyz);
+    return 0.5 * length(cross(e1, e2));
+}
+
+// Emitted radiance of material `m` at `uv` (already scaled/offset), following Godot's emission
+// operators: (color + texture) * energy, or color * texture * energy.
+vec3 material_emission(const Material m, vec2 uv) {
+    vec3 e = m.emission.rgb;
+    if (m.emission_texture < 0) return e;
+    vec3 t = textureLod(albedo_textures, vec3(uv, float(m.emission_texture)), 0.0).rgb * m.emission_energy;
+    return (m.flags & MATERIAL_FLAG_EMISSION_MULTIPLY) != 0u ? e * t : e + t;
+}
+
+// Godot's BaseMaterial3D::TextureChannel: red, green, blue, alpha, grayscale.
+float texture_channel(vec4 t, uint channel) {
+    if (channel == 0u) return t.r;
+    if (channel == 1u) return t.g;
+    if (channel == 2u) return t.b;
+    if (channel == 3u) return t.a;
+    return (t.r + t.g + t.b) / 3.0;
+}
+
+ShadingInfo get_shading(const Ray ray, const Hit h) {
+    ShadingInfo s;
+    Instance inst = instances[h.instance];
+    Triangle tri = triangles[h.triangle];
+    TriangleData td = triangle_data[h.triangle];
+    Material m = materials[instance_materials[inst.material_offset + td.surface]];
+
+    float u = h.bary.x;
+    float v = h.bary.y;
+    float w = 1.0 - u - v;
+
+    s.position = ray.o + ray.d * h.t;
+    s.out_dir = -ray.d;
+
+    vec3 ng = normalize(xform_normal(inst.w2o, cross(tri.e1.xyz, tri.e2.xyz)));
+    vec3 ns = normalize(xform_normal(inst.w2o, td.n0 * w + td.n1.xyz * u + td.n2.xyz * v));
+    if (any(isnan(ns)) || dot(ns, ns) < 0.5) ns = ng;
+    vec2 uv = material_uv(m, td, h.bary);
+
+    if (m.normal_texture >= 0) {
+        // Tangent space normal map. The per-triangle tangent is orthogonalized against the
+        // interpolated normal; the bitangent follows +v (DirectX convention), so OpenGL style maps
+        // (Godot's default) flip green. z is rebuilt from xy (two-channel compressed maps).
+        vec3 t_obj = vec3(td.n1.w, td.n2.w, td.tangent_z_sign.x);
+        vec3 t = xform_vector(inst.o2w, t_obj);
+        t = t - ns * dot(ns, t);
+        if (dot(t, t) > 1e-12) {
+            t = normalize(t);
+            float sgn = td.tangent_z_sign.y * (dot(ng, ns) >= 0.0 ? 1.0 : -1.0);
+            vec3 b = cross(ns, t) * sgn;
+            vec2 xy = textureLod(data_textures, vec3(uv, float(m.normal_texture)), 0.0).rg * 2.0 - 1.0;
+            if ((m.flags & MATERIAL_FLAG_NORMAL_DIRECTX) == 0u) xy.y = -xy.y;
+            xy *= m.normal_scale;
+            float z = sqrt(max(1.0 - dot(xy, xy), 0.0));
+            vec3 mapped = normalize(t * xy.x + b * xy.y + ns * z);
+            if (!any(isnan(mapped))) ns = mapped;
+        }
+    }
+    // The winding of cross(e1, e2) is a convention (Godot meshes are clockwise, so it usually points
+    // inwards); the vertex normals say which side is out. Orient the geometric normal to match them,
+    // otherwise the back-face flip below turns ns away from the viewer and it gets replaced by ng.
+    if (dot(ng, ns) < 0.0) ng = -ng;
+    if (dot(ng, s.out_dir) < 0.0) { // back face: flip both normals towards the viewer
+        ng = -ng;
+        ns = -ns;
+    }
+    // Shading normals can point away from the viewer near silhouettes; fall back to the geometric one.
+    if (dot(ns, s.out_dir) < 1e-3) ns = ng;
+    s.geo_normal = ng;
+    s.normal = ns;
+    s.lambert_out = max(dot(ns, s.out_dir), 1e-4);
+
+    vec3 albedo = m.albedo.rgb;
+    if (m.albedo_texture >= 0) {
+        albedo *= textureLod(albedo_textures, vec3(uv, float(m.albedo_texture)), 0.0).rgb;
+    }
+
+    s.emission = material_emission(m, uv);
+    s.emission_luminance = luminance(s.emission);
+    float metallic = m.metallic;
+    float roughness = m.roughness;
+    if (m.metallic_texture >= 0) {
+        vec4 t = textureLod(data_textures, vec3(uv, float(m.metallic_texture)), 0.0);
+        metallic *= texture_channel(t, (m.channels >> 3u) & 7u);
+    }
+    if (m.roughness_texture >= 0) {
+        vec4 t = textureLod(data_textures, vec3(uv, float(m.roughness_texture)), 0.0);
+        roughness *= texture_channel(t, m.channels & 7u);
+    }
+    s.fresnel_0 = mix(vec3(0.04), albedo, metallic);
+    s.diffuse_albedo = albedo * (1.0 - metallic);
+    float alpha = roughness * roughness;
+    s.roughness = max(alpha, 0.01);
+    s.area = triangle_world_area(inst, tri);
+    return s;
+}
+
+vec3 offset_origin(const ShadingInfo s, vec3 dir) {
+    // Push the origin off the surface on the side the new ray leaves through.
+    float scale = 1e-4 * max(1.0, max(max(abs(s.position.x), abs(s.position.y)), abs(s.position.z)));
+    return s.position + s.geo_normal * (dot(dir, s.geo_normal) >= 0.0 ? scale : -scale);
+}
+
+// ----------------------------------- PORTALS -----------------------------------
+
+// Finds the closest portal whose front face the ray enters within (0, t_max).
+bool intersect_portals(const Ray r, const float t_max, out float t_hit, out uint index) {
+    t_hit = t_max;
+    index = 0u;
+    bool found = false;
+    for (uint i = 0u; i < frame.portal_count; i++) {
+        Portal p = portals[i];
+        vec3 o = xform_point(p.w2l, r.o);
+        vec3 d = xform_vector(p.w2l, r.d);
+        if (d.z >= 0.0) continue; // only the front face (+z) is a portal
+        float t = -o.z / d.z;
+        if (t <= 1e-5 || t >= t_hit) continue;
+        vec2 q = o.xy + d.xy * t;
+        if (abs(q.x) > p.half_size.x || abs(q.y) > p.half_size.y) continue;
+        t_hit = t;
+        index = i;
+        found = true;
+    }
+    return found;
+}
+
+struct SceneHit {
+    bool found;            // a surface was hit
+    bool absorbed;         // path ended inside a portal (unlinked or too many hops)
+    bool crossed_portal;   // the segment passed through at least one portal
+    float distance;        // total distance travelled including portal hops
+    Hit hit;
+};
+
+// Traces `ray` through portals. On return `ray` is the final (possibly teleported) segment and
+// `throughput` includes portal tints.
+SceneHit trace_scene(inout Ray ray, inout vec3 throughput) {
+    SceneHit sh;
+    sh.found = false;
+    sh.absorbed = false;
+    sh.crossed_portal = false;
+    sh.distance = 0.0;
+    for (uint hop = 0u; hop <= frame.max_portal_hops; hop++) {
+        bool found = trace_closest(ray, INF, sh.hit);
+        if (frame.portal_count > 0u) {
+            float pt;
+            uint pi;
+            if (intersect_portals(ray, found ? sh.hit.t : INF, pt, pi)) {
+                Portal p = portals[pi];
+                if (p.linked == 0u || hop == frame.max_portal_hops) {
+                    sh.absorbed = true;
+                    sh.distance += pt;
+                    return sh;
+                }
+                vec3 pos = ray.o + ray.d * pt;
+                ray.o = xform_point(p.teleport, pos);
+                ray.d = normalize(xform_vector(p.teleport, ray.d));
+                ray.o += ray.d * 1e-4;
+                throughput *= p.tint.rgb;
+                sh.distance += pt;
+                sh.crossed_portal = true;
+                continue;
+            }
+        }
+        sh.found = found;
+        if (found) sh.distance += sh.hit.t;
+        return sh;
+    }
+    sh.absorbed = true;
+    return sh;
+}
+
+// Shadow ray. Portal fronts block visibility: light is not sampled through portals.
+bool occluded(const Ray r, const float t_max) {
+    if (frame.portal_count > 0u) {
+        float pt;
+        uint pi;
+        if (intersect_portals(r, t_max, pt, pi)) return true;
+    }
+    return trace_any(r, t_max);
+}
+
+// ----------------------------------- DIRECT LIGHTING -----------------------------------
+
+float power_heuristic(float a, float b) {
+    float a2 = a * a;
+    float b2 = b * b;
+    return a2 / max(a2 + b2, 1e-20);
+}
+
+// Probability (solid angle) that next event estimation picks the point `s` as seen from `from`.
+// Probability that the emissive triangle light sampler picks the triangle of hit `h`.
+float emissive_pmf(const Hit h) {
+    if (frame.emissive_count == 0u || frame.emissive_total_power <= 0.0) return 0.0;
+    Instance inst = instances[h.instance];
+    if ((inst.flags & INSTANCE_FLAG_EMISSIVE) == 0u) return 0.0;
+    uint index = inst.emissive_offset + (h.triangle - inst.triangle_offset);
+    if (index >= frame.emissive_count) return 0.0;
+    return emissive_triangles[index].power / frame.emissive_total_power;
+}
+
+// ReSTIR DI light candidates: probability of sampling the environment rather than an emitter.
+float di_environment_probability() {
+    bool env = (frame.flags & FLAG_ENVIRONMENT) != 0u;
+    bool emitters = frame.emissive_count > 0u && frame.emissive_total_power > 0.0;
+    return env ? (emitters ? 0.5 : 1.0) : 0.0;
+}
+
+float emissive_light_pdf(const ShadingInfo s, const Hit h, vec3 from) {
+    float pmf_hit = emissive_pmf(h);
+    if (pmf_hit <= 0.0) return 0.0;
+    vec3 to_light = s.position - from;
+    float dist2 = dot(to_light, to_light);
+    float cos_l = abs(dot(s.geo_normal, normalize(to_light)));
+    if (cos_l < 1e-6) return 0.0;
+    // The exact probability the light sampler picks this triangle (its CDF entry).
+    float pmf = pmf_hit;
+    return pmf * dist2 / (cos_l * s.area);
+}
+
+// Alias table lookup: an emissive triangle with probability power / total power.
+uint pick_emissive_triangle(inout uint rng) {
+    uint index = rand_index(rng, frame.emissive_count);
+    if (rand(rng) >= emissive_triangles[index].alias_prob) index = emissive_triangles[index].alias;
+    return index;
+}
+
+// A light sample for next event estimation: the unshadowed contribution (BSDF * cos * radiance *
+// MIS weight / pdf) and the shadow ray that decides whether it counts.
+struct NeeSample {
+    vec3 c;
+    vec3 o;
+    vec3 d;
+    float t_max;
+};
+
+// A uniformly distributed point on an emissive triangle picked by power: position, unit normal,
+// world area, emitted radiance and the probability of picking the triangle.
+struct EmitterPoint {
+    vec3 p;
+    vec3 n;
+    float area;
+    vec3 emitted;
+    float pmf;
+};
+
+EmitterPoint sample_emitter_point(inout uint rng) {
+    EmissiveTriangle light = emissive_triangles[pick_emissive_triangle(rng)];
+    Material m = materials[light.material];
+    vec2 r = rand2(rng);
+    if (r.x + r.y > 1.0) r = 1.0 - r;
+    EmitterPoint e;
+    e.p = light.v0 + light.e1 * r.x + light.e2 * r.y;
+    vec3 n_cross = cross(light.e1, light.e2);
+    e.area = 0.5 * length(n_cross);
+    e.n = n_cross / max(2.0 * e.area, 1e-12);
+    vec2 uv = (light.uv0 * (1.0 - r.x - r.y) + light.uv1 * r.x + light.uv2 * r.y) * m.uv_scale_offset.xy + m.uv_scale_offset.zw;
+    e.emitted = material_emission(m, uv);
+    e.pmf = light.power / frame.emissive_total_power;
+    return e;
+}
+
+bool sample_emissive(const ShadingInfo s, inout uint rng, out NeeSample n) {
+    EmitterPoint e = sample_emitter_point(rng);
+    vec3 p = e.p;
+    vec3 nl = e.n;
+    float area = e.area;
+    vec3 emitted = e.emitted;
+
+    vec3 origin = offset_origin(s, p - s.position);
+    vec3 to_light = p - origin;
+    float dist2 = dot(to_light, to_light);
+    float dist = sqrt(dist2);
+    vec3 wi = to_light / dist;
+
+    float cos_s = dot(s.normal, wi);
+    float cos_l = abs(dot(nl, wi)); // emitters are two-sided
+    if (cos_s <= 0.0 || cos_l < 1e-6 || dot(s.geo_normal, wi) <= 0.0) return false;
+
+    float pdf_light = e.pmf * dist2 / (cos_l * area);
+    if (!(pdf_light > 0.0)) return false;
+
+    vec3 f = brdf(s, wi) * cos_s;
+    float pdf_bsdf = get_brdf_density(s, wi);
+    n.c = f * emitted * power_heuristic(pdf_light, pdf_bsdf) / pdf_light;
+    n.o = origin;
+    n.d = wi;
+    n.t_max = dist * (1.0 - 1e-4);
+    return true;
+}
+
+// Next event estimation towards the environment map, MIS-weighted against BSDF sampling.
+bool sample_environment(const ShadingInfo s, inout uint rng, out NeeSample n) {
+    vec3 radiance;
+    float pdf;
+    vec3 wi = sample_environment_dir(rng, radiance, pdf);
+    if (!(pdf > 0.0)) return false;
+    float cos_s = dot(s.normal, wi);
+    if (cos_s <= 0.0 || dot(s.geo_normal, wi) <= 0.0) return false;
+    vec3 f = brdf(s, wi) * cos_s;
+    n.c = f * radiance * power_heuristic(pdf, get_brdf_density(s, wi)) / pdf;
+    n.o = offset_origin(s, wi);
+    n.d = wi;
+    n.t_max = INF;
+    return true;
+}
+
+float godot_omni_attenuation(float dist, float range, float decay) {
+    float nd = dist / max(range, 1e-4);
+    nd *= nd;
+    nd *= nd;
+    nd = max(1.0 - nd, 0.0);
+    nd *= nd;
+    return nd * pow(max(dist, 1e-4), -decay);
+}
+
+bool sample_punctual(const ShadingInfo s, const PunctualLight light, inout uint rng, out NeeSample n) {
+    vec3 wi;
+    float dist;
+    vec3 radiance;
+    if (light.type == LIGHT_DIRECTIONAL) {
+        vec3 l = -light.direction;
+        if (light.radius > 0.0) { // soft shadows: sample a cone around the sun direction
+            mat3 b = basis_from_normal(l);
+            vec2 disk = sample_disk(rand2(rng)) * light.radius;
+            l = normalize(b * vec3(disk, 1.0));
+        }
+        wi = l;
+        dist = INF;
+        radiance = light.color;
+    } else {
+        vec3 target = light.position;
+        if (light.radius > 0.0) target += sample_sphere(rand2(rng)) * light.radius;
+        vec3 to_light = target - s.position;
+        dist = length(to_light);
+        if (dist < 1e-5 || dist > light.range) return false;
+        wi = to_light / dist;
+        radiance = light.color * godot_omni_attenuation(dist, light.range, light.attenuation);
+        if (light.type == LIGHT_SPOT) {
+            float c = dot(-wi, light.direction);
+            radiance *= smoothstep(light.spot_cos_outer, light.spot_cos_inner, c);
+        }
+    }
+    float cos_s = dot(s.normal, wi);
+    if (cos_s <= 0.0 || dot(s.geo_normal, wi) <= 0.0 || luminance(radiance) <= 0.0) return false;
+    n.c = brdf(s, wi) * cos_s * radiance;
+    n.o = offset_origin(s, wi);
+    n.d = wi;
+    n.t_max = dist == INF ? INF : dist * (1.0 - 1e-4);
+    return true;
+}
+
+// Streaming selection of one light sample proportional to the luminance of its unshadowed
+// contribution. The caller traces a single shadow ray for the pick and scales it by w_sum / w, so
+// the expected value is the same as tracing every candidate (sum of c_i * V_i), with one ray.
+void nee_consider(bool valid, const NeeSample cand, inout NeeSample chosen, inout float chosen_w,
+                  inout float w_sum, inout uint rng) {
+    if (!valid) return;
+    float w = luminance(cand.c);
+    if (!(w > 0.0) || isinf(w)) return;
+    w_sum += w;
+    if (rand(rng) * w_sum < w) {
+        chosen = cand;
+        chosen_w = w;
+    }
+}
+
+// ----------------------------------- INTEGRATOR -----------------------------------
+
+// What the camera ray saw first; drives temporal reprojection.
+struct Primary {
+    bool hit;
+    vec3 normal;        // world normal at the first hit (after portals)
+    float distance;     // distance along the (virtual, unfolded) camera ray; -1 for sky
+    vec3 prev_position; // where this point was last frame, in world space
+    bool has_prev;      // false for sky (reproject by direction instead)
+    vec3 albedo;        // reflectance at the first hit (times portal tints), 1 for sky; for demodulation
+};
+
+vec3 clamp_contribution(vec3 c, uint depth) {
+    if (depth == 0u || frame.firefly_clamp <= 0.0) return c;
+    float l = luminance(c);
+    return l > frame.firefly_clamp ? c * (frame.firefly_clamp / l) : c;
+}
+
+Ray camera_ray(vec2 pixel) {
+    // Godot's RD projection already accounts for the flipped Vulkan framebuffer y axis.
+    vec2 ndc = pixel / vec2(frame.size) * 2.0 - 1.0;
+    vec4 view = frame.inv_projection * vec4(ndc, 0.5, 1.0);
+    view.xyz /= view.w;
+    Ray r;
+    r.o = frame.cam_to_world[3].xyz;
+    r.d = normalize(mat3(frame.cam_to_world) * normalize(view.xyz));
+    return r;
+}
+
+#ifndef RESTIR_PASS
+
+// Where this pixel's primary hit (or, for the sky, the view direction) was on screen last frame,
+// as a pixel coordinate (pixel centres at integers). The sample was taken at `pixel` (jittered);
+// its screen motion is applied to the pixel centre, so a static view reprojects to exactly the
+// same pixel instead of resampling (and slowly blurring) the history every frame.
+vec4 compute_motion(const Primary primary, const vec3 view_dir, const vec2 pixel) {
+    vec4 clip;
+    float expected = -1.0;
+    if (primary.hit) {
+        if (!primary.has_prev) return vec4(0.0);
+        clip = frame.prev_view_proj * vec4(primary.prev_position, 1.0);
+        expected = length(primary.prev_position - frame.prev_cam_pos.xyz);
+    } else {
+        clip = frame.prev_view_proj * vec4(view_dir, 0.0); // sky: direction only
+    }
+    if (clip.w <= 1e-6) return vec4(0.0);
+    vec2 ndc = clip.xy / clip.w;
+    vec2 prev_pixel = (ndc * 0.5 + 0.5) * vec2(frame.size); // same convention as `pixel`
+    vec2 p = floor(pixel) + (prev_pixel - pixel); // pixel corner + motion
+    if (!(all(greaterThan(p, vec2(-1.0))) && all(lessThan(p, vec2(frame.size))))) return vec4(0.0);
+    return vec4(p, expected, 1.0);
+}
+
+// Writes the per-pixel outputs that only depend on the primary hit. Called as soon as they are
+// known, so none of this stays live across later traceRayEXT calls (in a raygen shader, all live
+// state is spilled to the ray tracing stack at every trace).
+void store_primary(ivec2 pos, const Primary p, vec3 view_dir, vec2 pixel) {
+    imageStore(frame_motion, pos, compute_motion(p, view_dir, pixel));
+    imageStore(frame_albedo, pos, vec4(p.albedo, 1.0));
+    imageStore(gbuffer_out, pos, vec4(p.normal, p.hit ? p.distance : -1.0));
+}
+
+// Adds `c` (including the full path throughput) to the frame color or, behind x2, to the GI
+// sample radiance (`gi_c` = the same contribution relative to x2), with the firefly clamp.
+void add_contribution(inout vec3 radiance, inout vec3 gi_radiance, bool split, vec3 c, vec3 gi_c, uint depth) {
+    vec3 clamped = clamp_contribution(c, depth);
+    if (!split) {
+        radiance += clamped;
+        return;
+    }
+    float l = luminance(c);
+    gi_radiance += gi_c * (l > 0.0 ? luminance(clamped) / l : 1.0);
+}
+
+// Traces one path. With `first`, also writes the primary hit outputs (motion, albedo, G-buffer)
+// and, with FLAG_RESTIR, the ReSTIR GI sample:
+//
+// The path is split at the primary hit x1. Direct light at x1 (its emission, NEE and the
+// MIS-weighted emission found by the BSDF ray) and anything through portals or to the sky stay in
+// the returned color; the radiance leaving the secondary hit x2 towards x1 (excluding x2's own
+// emission) becomes a sample that restir.glsli resamples across pixels and frames and then shades
+// at x1. gi_hit = x1 and its packed geometric normal (w < 0: not reusable), gi_sample = x2 and the
+// solid angle pdf of x1 -> x2 (0 = no sample), gi_radiance = that radiance and x2's normal.
+vec3 path_trace(Ray ray, inout uint rng, const bool first, const ivec2 pos, const vec2 pixel) {
+    vec3 radiance = vec3(0.0);
+    vec3 throughput = vec3(1.0);
+    float prev_bsdf_pdf = 0.0;
+    vec3 prev_position = ray.o;
+    const vec3 camera_dir = ray.d;
+    const vec3 camera_pos = ray.o;
+
+    const bool restir = first && (frame.flags & FLAG_RESTIR) != 0u;
+    const bool restir_di = first && (frame.flags & FLAG_RESTIR_DI) != 0u;
+    bool reusable = false;          // x1 is a surface seen directly (not through a portal)
+    bool split = false;             // contributions now belong to the GI sample
+    vec3 gi_radiance = vec3(0.0);
+    vec3 gi_throughput = vec3(1.0); // throughput relative to x2
+    float gi_normal = 0.0;          // packed normal at x2
+
+    if (restir || restir_di) { // defaults, overwritten below when there is something to reuse
+        imageStore(gi_hit_out, pos, vec4(0.0, 0.0, 0.0, -1.0));
+        imageStore(gi_sample_out, pos, vec4(0.0));
+    }
+    if (restir_di) imageStore(di_hit_a_out, pos, vec4(0.0, 0.0, 0.0, -1.0));
+
+    for (uint depth = 0u; depth <= frame.max_bounces; depth++) {
+        vec3 tint = vec3(1.0);
+        SceneHit sh = trace_scene(ray, tint);
+        throughput *= tint;
+        gi_throughput *= tint;
+
+        if (depth == 0u && first && !sh.found) { // sky or absorbed by a portal
+            Primary p;
+            p.hit = sh.absorbed;
+            p.distance = sh.absorbed ? sh.distance : -1.0;
+            p.normal = -camera_dir;
+            p.prev_position = camera_pos + camera_dir * sh.distance;
+            p.has_prev = sh.absorbed;
+            p.albedo = vec3(1.0);
+            store_primary(pos, p, camera_dir, pixel);
+        }
+        if (sh.absorbed) break;
+        if (!sh.found) {
+            vec3 sky = sample_sky(ray.d);
+            bool env = (frame.flags & FLAG_ENVIRONMENT) != 0u;
+            if (depth == 1u && reusable && restir_di && env && !sh.crossed_portal) {
+                // ReSTIR DI owns the environment light at x1: hand it the BSDF sample.
+                imageStore(di_hit_a_out, pos, vec4(ray.d, di_environment_probability() * env_pdf(ray.d)));
+                imageStore(di_hit_b_out, pos, vec4(sky, -1.0));
+                break;
+            }
+            // The environment is light sampled too (not through portals): MIS weight.
+            if (depth > 0u && !sh.crossed_portal && env) {
+                sky *= power_heuristic(prev_bsdf_pdf, env_pdf(ray.d));
+            }
+            add_contribution(radiance, gi_radiance, split, throughput * sky, gi_throughput * sky, depth);
+            break;
+        }
+        ShadingInfo s = get_shading(ray, sh.hit);
+
+        if (depth == 0u && first) {
+            Primary p;
+            p.hit = true;
+            p.distance = sh.distance;
+            p.normal = s.normal;
+            p.has_prev = true;
+            p.albedo = (s.diffuse_albedo + s.fresnel_0) * throughput;
+            if (sh.crossed_portal) {
+                // Seen through a portal: reproject the unfolded point (exact for static portals).
+                p.prev_position = camera_pos + camera_dir * sh.distance;
+            } else {
+                Instance inst = instances[sh.hit.instance];
+                p.prev_position = xform_point(inst.prev_o2w, xform_point(inst.w2o, s.position));
+            }
+            store_primary(pos, p, camera_dir, pixel);
+            if ((restir || restir_di) && !sh.crossed_portal) {
+                reusable = true;
+                // Position and normal directly, so the ReSTIR passes need no dependent buffer loads.
+                imageStore(gi_hit_out, pos, vec4(s.position, pack_normal(s.geo_normal)));
+                imageStore(surface_out, pos, uvec4(packHalf2x16(s.diffuse_albedo.rg),
+                                                   packHalf2x16(vec2(s.diffuse_albedo.b, s.roughness)),
+                                                   packHalf2x16(s.fresnel_0.rg), packHalf2x16(vec2(s.fresnel_0.b, 0.0))));
+            }
+        }
+        if (depth == 1u && reusable && restir && !sh.crossed_portal) {
+            split = true;
+            gi_normal = pack_normal(s.geo_normal);
+            imageStore(gi_sample_out, pos, vec4(s.position, prev_bsdf_pdf));
+        }
+
+        // Emission found by BSDF sampling, MIS-weighted against next event estimation.
+        // Light sampling never reaches through portals, so those paths keep full weight.
+        if (depth == 1u && reusable && restir_di && !sh.crossed_portal && s.emission_luminance > 0.0) {
+            // ReSTIR DI owns emitters seen from x1: hand it the BSDF sample (light pdf in area measure).
+            float pmf = emissive_pmf(sh.hit);
+            float p_light = (1.0 - di_environment_probability()) * pmf / max(s.area, 1e-12);
+            imageStore(di_hit_a_out, pos, vec4(s.position, pmf > 0.0 ? p_light : 0.0));
+            imageStore(di_hit_b_out, pos, vec4(s.emission, pack_normal(s.geo_normal)));
+        } else if (s.emission_luminance > 0.0) {
+            float weight = 1.0;
+            if (depth > 0u && !sh.crossed_portal) {
+                weight = power_heuristic(prev_bsdf_pdf, emissive_light_pdf(s, sh.hit, prev_position));
+            }
+            // x2's own emission is direct light at x1: it stays in the frame color.
+            vec3 e = s.emission * weight;
+            add_contribution(radiance, gi_radiance, split && depth > 1u, throughput * e, gi_throughput * e, depth);
+        }
+
+        if (depth == frame.max_bounces) break;
+
+        // Next event estimation: one sample from each light type (emitters, environment, every
+        // punctual light), but only one shadow ray, for a candidate picked by unshadowed luminance.
+        // At a reusable x1 with ReSTIR DI, emitters and the environment come from restir_di.glsli.
+        {
+            bool di_here = depth == 0u && reusable && restir_di;
+            NeeSample chosen, cand;
+            float chosen_w = 0.0;
+            float w_sum = 0.0;
+            if (frame.emissive_count > 0u && !di_here)
+                nee_consider(sample_emissive(s, rng, cand), cand, chosen, chosen_w, w_sum, rng);
+            if ((frame.flags & FLAG_ENVIRONMENT) != 0u && !di_here)
+                nee_consider(sample_environment(s, rng, cand), cand, chosen, chosen_w, w_sum, rng);
+            for (uint i = 0u; i < frame.punctual_count; i++)
+                nee_consider(sample_punctual(s, punctual_lights[i], rng, cand), cand, chosen, chosen_w, w_sum, rng);
+            if (w_sum > 0.0) {
+                Ray shadow;
+                shadow.o = chosen.o;
+                shadow.d = chosen.d;
+                if (!occluded(shadow, chosen.t_max)) {
+                    vec3 direct = chosen.c * (w_sum / chosen_w);
+                    add_contribution(radiance, gi_radiance, split, throughput * direct, gi_throughput * direct,
+                                     depth + 1u);
+                }
+            }
+        }
+
+        vec3 wi = sample_brdf(s, rand2(rng));
+        float cos_in = dot(s.normal, wi);
+        if (cos_in <= 0.0 || dot(s.geo_normal, wi) <= 0.0) break;
+        float pdf = get_brdf_density(s, wi);
+        if (!(pdf > 1e-8)) break;
+        vec3 factor = brdf(s, wi) * cos_in / pdf;
+        throughput *= factor;
+        if (split) gi_throughput *= factor;
+
+        if (depth >= 2u) { // Russian roulette
+            float p = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
+            if (rand(rng) > p) break;
+            throughput /= p;
+            gi_throughput /= p;
+        }
+        if (any(isnan(throughput)) || any(isinf(throughput))) break;
+
+        prev_bsdf_pdf = pdf;
+        prev_position = s.position;
+        ray.o = offset_origin(s, wi);
+        ray.d = wi;
+    }
+
+    if (restir) {
+        bool ok = split && !any(isnan(gi_radiance)) && !any(isinf(gi_radiance));
+        // Scaled like the frame color, which averages samples_per_pixel paths.
+        vec3 lo = ok ? gi_radiance / float(max(frame.samples_per_pixel, 1u)) : vec3(0.0);
+        imageStore(gi_radiance_out, pos, vec4(lo, gi_normal));
+    }
+    return radiance;
+}
+
+vec3 debug_view(Ray ray, const ivec2 pos) {
+    vec3 throughput = vec3(1.0);
+    const vec3 camera_dir = ray.d;
+    const vec3 camera_pos = ray.o;
+    SceneHit sh = trace_scene(ray, throughput);
+    Primary p;
+    p.hit = sh.found || sh.absorbed;
+    p.distance = p.hit ? sh.distance : -1.0;
+    p.normal = -camera_dir;
+    p.prev_position = camera_pos + camera_dir * sh.distance;
+    p.has_prev = p.hit;
+    p.albedo = vec3(1.0);
+    vec3 c;
+    if (frame.debug_mode == DEBUG_TRAVERSAL) {
+        float x = clamp(float(sh.hit.steps) / 128.0, 0.0, 1.0);
+        c = vec3(x, x * x, 1.0 - x) * x;
+    } else if (sh.absorbed) {
+        c = vec3(0.0);
+    } else if (!sh.found) {
+        c = sample_sky(ray.d) * throughput;
+    } else {
+        ShadingInfo s = get_shading(ray, sh.hit);
+        p.normal = s.normal;
+        c = frame.debug_mode == DEBUG_NORMALS ? (s.normal * 0.5 + 0.5) * throughput : s.diffuse_albedo * throughput;
+    }
+    store_primary(pos, p, camera_dir, vec2(pos) + 0.5);
+    return c;
+}
+
+// ----------------------------------- ENTRY -----------------------------------
+
+void pt_main() {
+    ivec2 pos = ivec2(PIXEL_ID);
+    if (pos.x >= frame.size.x || pos.y >= frame.size.y) return;
+
+    uint rng = pcg_hash(uint(pos.x) + pcg_hash(uint(pos.y) + pcg_hash(frame.frame_index)));
+
+    vec3 color = vec3(0.0);
+    if (frame.debug_mode != DEBUG_NONE) {
+        color = debug_view(camera_ray(vec2(pos) + 0.5), pos);
+    } else {
+        uint spp = max(frame.samples_per_pixel, 1u);
+        for (uint i = 0u; i < spp; i++) {
+            vec2 pixel = vec2(pos) + rand2(rng);
+            // Only the first path writes the primary outputs and feeds ReSTIR.
+            vec3 c = path_trace(camera_ray(pixel), rng, i == 0u, pos, pixel);
+            if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
+            color += c;
+        }
+        color /= float(spp);
+    }
+    imageStore(frame_color, pos, vec4(color, 1.0));
+}
+
+#endif // RESTIR_PASS
